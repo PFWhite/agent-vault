@@ -18,6 +18,7 @@ builds:
       - -X github.com/Infisical/agent-vault/cmd.version={{.Version}}
       - -X github.com/Infisical/agent-vault/cmd.commit={{.ShortCommit}}
       - -X github.com/Infisical/agent-vault/cmd.date={{.Date}}
+      - -X github.com/Infisical/agent-vault/cmd.posthogAPIKey={{ .Env.POSTHOG_API_KEY }}
     goos:
       - linux
       - darwin
@@ -51,6 +52,15 @@ signs:
       - "--yes"
       - "--bundle=${signature}"
       - "${artifact}"
+
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    output: true
+    args:
+      - "sign"
+      - "--yes"
+      - "${artifact}@${digest}"
 
 changelog:
   sort: asc
@@ -132,4 +142,9 @@ release:
       --certificate-identity-regexp "^https://github\.com/Infisical/agent-vault/\.github/workflows/release\.yml@refs/tags/" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       checksums.txt
+
+    # Verify Docker image signature (requires cosign)
+    cosign verify infisical/agent-vault:{{ .Version }} \
+      --certificate-identity-regexp "^https://github\.com/Infisical/agent-vault/\.github/workflows/release\.yml@refs/tags/" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
     ```

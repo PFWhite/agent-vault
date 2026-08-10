@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/pidfile"
 	"github.com/Infisical/agent-vault/internal/session"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/telemetry"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -53,8 +55,27 @@ const (
 	hostingSelfHosting = "self-hosting"
 )
 
-// httpClient is used for setup-flow HTTP calls with a reasonable timeout.
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+// httpClient is used for control-plane HTTP calls (discover, proposals,
+// sessions) with a reasonable timeout. The custom proxy function skips
+// the proxy for calls to AGENT_VAULT_ADDR (the broker's own server) so
+// control-plane traffic goes direct even when the child process inherits
+// MITM proxy env vars. All other destinations fall through to the
+// system proxy, so corporate proxies still work for direct CLI usage.
+var httpClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &clientHeaderTransport{
+		base: &http.Transport{
+			Proxy: func(r *http.Request) (*url.URL, error) {
+				if avAddr := os.Getenv("AGENT_VAULT_ADDR"); avAddr != "" {
+					if u, err := url.Parse(avAddr); err == nil && r.URL.Host == u.Host {
+						return nil, nil
+					}
+				}
+				return http.ProxyFromEnvironment(r)
+			},
+		},
+	},
+}
 
 // selectAddress prompts the user to pick a hosting option interactively.
 // Returns the server address to use.
@@ -158,7 +179,7 @@ func doRegister(address, email, password, deviceLabel string) (*registerResult, 
 		return nil, nil, err
 	}
 
-	resp, err := http.Post(address+"/v1/auth/register", "application/json", bytes.NewReader(body))
+	resp, err := httpClient.Post(address+"/v1/auth/register", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not reach server at %s: %w", address, err)
 	}
@@ -190,6 +211,8 @@ func doRegister(address, email, password, deviceLabel string) (*registerResult, 
 	if err := session.Save(sess); err != nil {
 		return nil, nil, fmt.Errorf("saving session: %w", err)
 	}
+	tel.Identify(email, map[string]string{"email": email})
+	tel.Alias(email, telemetry.MachineID())
 	return &result.registerResult, sess, nil
 }
 
@@ -208,7 +231,7 @@ func doLogin(address, email, password, deviceLabel string) (*session.ClientSessi
 		return nil, err
 	}
 
-	resp, err := http.Post(address+"/v1/auth/login", "application/json", bytes.NewReader(body))
+	resp, err := httpClient.Post(address+"/v1/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("could not reach server at %s: %w", address, err)
 	}
@@ -246,6 +269,8 @@ func doLogin(address, email, password, deviceLabel string) (*session.ClientSessi
 	if err := session.Save(sess); err != nil {
 		return nil, fmt.Errorf("saving session: %w", err)
 	}
+	tel.Identify(email, map[string]string{"email": email})
+	tel.Alias(email, telemetry.MachineID())
 	return sess, nil
 }
 
@@ -642,7 +667,7 @@ func doVaultScopedRequestWithBody(method, url, token, vault string, body []byte)
 		req.Header.Set("X-Vault", vault)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("could not reach server: %w", err)
 	}

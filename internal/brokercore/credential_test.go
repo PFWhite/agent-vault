@@ -14,11 +14,11 @@ import (
 
 // fakeCredStore satisfies CredentialStore for tests.
 type fakeCredStore struct {
-	brokerCfg     map[string]*store.BrokerConfig // vaultID → config
-	creds         map[string]*store.Credential   // key = vaultID+"|"+key
-	missKey       string                         // if set, GetCredential for this key returns nil/err
-	policy        UnmatchedHostPolicy            // unmatched-host policy returned by UnmatchedHostPolicy
-	brokerCfgErr  error                          // if non-nil, GetBrokerConfig returns this error
+	brokerCfg    map[string]*store.BrokerConfig // vaultID → config
+	creds        map[string]*store.Credential   // key = vaultID+"|"+key
+	missKey      string                         // if set, GetCredential for this key returns nil/err
+	policy       UnmatchedHostPolicy            // unmatched-host policy returned by UnmatchedHostPolicy
+	brokerCfgErr error                          // if non-nil, GetBrokerConfig returns this error
 
 	getCredentialCalls int // call count — used by passthrough tests to assert no lookup
 }
@@ -99,7 +99,7 @@ func TestInject_BearerHappyPath(t *testing.T) {
 	f.setCred(t, key32, "v1", "MY_TOKEN", "s3cret")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestInject_BasicHappyPath(t *testing.T) {
 	f.setCred(t, key32, "v1", "PASS", "wonderland")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestInject_APIKeyCustomHeader(t *testing.T) {
 	f.setCred(t, key32, "v1", "STRIPE_KEY", "live123")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestInject_CustomHeaders(t *testing.T) {
 	f.setCred(t, key32, "v1", "TENANT", "42")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestInject_StripsPortForMatching(t *testing.T) {
 	f.setCred(t, key32, "v1", "TOK", "v")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.example.com:443", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com:443", 443, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestInject_HealsLegacyUnnamedServiceMatchedName(t *testing.T) {
 	f.setCred(t, key32, "v1", "TOK", "s3cret")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestInject_WildcardMatch(t *testing.T) {
 	f.setCred(t, key32, "v1", "GH", "ghp_abc")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.github.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.github.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestInject_PathBasedDisambiguation(t *testing.T) {
 		{"/api/apps.connections.open", "Bearer xapp-conn", "slack-conn", "/api/apps.connections.*"},
 	}
 	for _, tc := range cases {
-		res, err := p.Inject(context.Background(), "v1", "slack.com", tc.path)
+		res, err := p.Inject(context.Background(), "v1", "slack.com", 0, tc.path)
 		if err != nil {
 			t.Fatalf("path %q: unexpected err: %v", tc.path, err)
 		}
@@ -393,7 +393,7 @@ func TestInject_UnmatchedHost_DefaultPassthrough(t *testing.T) {
 	// no matching service forwards without injection.
 	f := newFakeCredStore()
 	p := NewStoreCredentialProvider(f, make32(0x77))
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestInject_UnmatchedHost_HostMissPassthrough(t *testing.T) {
 	f.setCred(t, key32, "v1", "T", "x")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "other.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "other.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestInject_UnmatchedHost_DenyPolicy(t *testing.T) {
 	f := newFakeCredStore()
 	f.policy = PolicyDeny
 	p := NewStoreCredentialProvider(f, make32(0x77))
-	_, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if !errors.Is(err, ErrServiceNotFound) {
 		t.Fatalf("expected ErrServiceNotFound under deny policy, got %v", err)
 	}
@@ -453,7 +453,7 @@ func TestInject_UnmatchedHost_HostMissDeny(t *testing.T) {
 	f.setCred(t, key32, "v1", "T", "x")
 
 	p := NewStoreCredentialProvider(f, key32)
-	_, err := p.Inject(context.Background(), "v1", "other.example.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "other.example.com", 0, "/")
 	if !errors.Is(err, ErrServiceNotFound) {
 		t.Fatalf("expected ErrServiceNotFound under deny policy, got %v", err)
 	}
@@ -467,7 +467,7 @@ func TestInject_GetBrokerConfigError_FailsClosed(t *testing.T) {
 	f := newFakeCredStore()
 	f.brokerCfgErr = errors.New("transient sqlite I/O error")
 	p := NewStoreCredentialProvider(f, make32(0xAB))
-	_, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if !errors.Is(err, ErrServiceNotFound) {
 		t.Fatalf("expected ErrServiceNotFound on store error, got %v", err)
 	}
@@ -482,7 +482,7 @@ func TestInject_CredentialMissing(t *testing.T) {
 	}})
 
 	p := NewStoreCredentialProvider(f, key32)
-	_, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if !errors.Is(err, ErrCredentialMissing) {
 		t.Fatalf("expected ErrCredentialMissing, got %v", err)
 	}
@@ -500,7 +500,7 @@ func TestInject_DecryptFails(t *testing.T) {
 	f.setCred(t, encKey, "v1", "TOK", "secret")
 
 	p := NewStoreCredentialProvider(f, wrongKey)
-	_, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if !errors.Is(err, ErrCredentialMissing) {
 		t.Fatalf("expected ErrCredentialMissing, got %v", err)
 	}
@@ -514,7 +514,7 @@ func TestInject_Passthrough(t *testing.T) {
 	}})
 
 	p := NewStoreCredentialProvider(f, make32(0xCC))
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestInject_ServiceDisabled(t *testing.T) {
 	f.setCred(t, key32, "v1", "TOK", "x")
 
 	p := NewStoreCredentialProvider(f, key32)
-	_, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if !errors.Is(err, ErrServiceDisabled) {
 		t.Fatalf("expected ErrServiceDisabled, got %v", err)
 	}
@@ -562,7 +562,7 @@ func TestInject_ServiceDisabled_Passthrough(t *testing.T) {
 		Auth:    broker.Auth{Type: "passthrough"},
 	}})
 	p := NewStoreCredentialProvider(f, make32(0xEF))
-	_, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if !errors.Is(err, ErrServiceDisabled) {
 		t.Fatalf("expected ErrServiceDisabled for disabled passthrough, got %v", err)
 	}
@@ -580,7 +580,7 @@ func TestInject_EnabledExplicitTrue(t *testing.T) {
 	f.setCred(t, key32, "v1", "TOK", "v")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.example.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -596,7 +596,7 @@ func TestInject_PassthroughPortStripped(t *testing.T) {
 		Auth: broker.Auth{Type: "passthrough"},
 	}})
 	p := NewStoreCredentialProvider(f, make32(0xDD))
-	res, err := p.Inject(context.Background(), "v1", "api.example.com:443", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.example.com:443", 443, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestInject_ResolvesSubstitutionAlongsideAuth(t *testing.T) {
 	f.setCred(t, key32, "v1", "TWILIO_AUTH_TOKEN", "tok-shh")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestInject_ResolvesSubstitutionOnPassthrough(t *testing.T) {
 	f.setCred(t, key32, "v1", "TWILIO_ACCOUNT_SID", "AC12345")
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", 0, "/")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -683,7 +683,7 @@ func TestInject_SubstitutionMissingCredentialErrorsLikeAuth(t *testing.T) {
 	}})
 	// No credential set → lookup returns "not found".
 	p := NewStoreCredentialProvider(f, key32)
-	_, err := p.Inject(context.Background(), "v1", "api.twilio.com", "/")
+	_, err := p.Inject(context.Background(), "v1", "api.twilio.com", 0, "/")
 	if !errors.Is(err, ErrCredentialMissing) {
 		t.Fatalf("expected ErrCredentialMissing, got %v", err)
 	}
@@ -707,7 +707,7 @@ func TestInject_AuthFailureLeavesSubstitutionsNil(t *testing.T) {
 	// MISSING_AUTH_KEY is intentionally not set.
 
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", 0, "/")
 	if !errors.Is(err, ErrCredentialMissing) {
 		t.Fatalf("expected ErrCredentialMissing, got %v", err)
 	}
@@ -716,6 +716,94 @@ func TestInject_AuthFailureLeavesSubstitutionsNil(t *testing.T) {
 	}
 	if res.Substitutions != nil {
 		t.Fatalf("expected res.Substitutions=nil on auth error to avoid leaking secrets, got %+v", res.Substitutions)
+	}
+}
+
+func TestInject_PortMatch(t *testing.T) {
+	port := 8080
+	key32 := make32(0xA1)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{{
+		Host: "api.example.com",
+		Port: &port,
+		Auth: broker.Auth{Type: "bearer", Token: "TOK"},
+	}})
+	f.setCred(t, key32, "v1", "TOK", "secret")
+
+	p := NewStoreCredentialProvider(f, key32)
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 8080, "/")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.MatchedPort == nil || *res.MatchedPort != 8080 {
+		t.Fatalf("expected MatchedPort=8080, got %v", res.MatchedPort)
+	}
+	if res.Headers["Authorization"] != "Bearer secret" {
+		t.Fatalf("got %q", res.Headers["Authorization"])
+	}
+}
+
+func TestInject_PortMismatch(t *testing.T) {
+	port := 8080
+	key32 := make32(0xA2)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{{
+		Host: "api.example.com",
+		Port: &port,
+		Auth: broker.Auth{Type: "bearer", Token: "TOK"},
+	}})
+	f.setCred(t, key32, "v1", "TOK", "secret")
+
+	p := NewStoreCredentialProvider(f, key32)
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 9090, "/")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !res.Passthrough {
+		t.Fatal("expected passthrough for port mismatch")
+	}
+}
+
+func TestInject_PortSpecificWinsOverGeneral(t *testing.T) {
+	port443 := 443
+	key32 := make32(0xA3)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{
+		{Name: "general", Host: "api.example.com", Auth: broker.Auth{Type: "bearer", Token: "GEN_TOK"}},
+		{Name: "port-specific", Host: "api.example.com", Port: &port443, Auth: broker.Auth{Type: "bearer", Token: "SPECIFIC_TOK"}},
+	})
+	f.setCred(t, key32, "v1", "GEN_TOK", "gen-secret")
+	f.setCred(t, key32, "v1", "SPECIFIC_TOK", "specific-secret")
+
+	p := NewStoreCredentialProvider(f, key32)
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 443, "/")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.MatchedName != "port-specific" {
+		t.Fatalf("expected port-specific to win, got %q", res.MatchedName)
+	}
+	if res.Headers["Authorization"] != "Bearer specific-secret" {
+		t.Fatalf("got %q", res.Headers["Authorization"])
+	}
+}
+
+func TestInject_NilPortMatchesAnyPort(t *testing.T) {
+	key32 := make32(0xA4)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{{
+		Host: "api.example.com",
+		Auth: broker.Auth{Type: "bearer", Token: "TOK"},
+	}})
+	f.setCred(t, key32, "v1", "TOK", "secret")
+
+	p := NewStoreCredentialProvider(f, key32)
+	res, err := p.Inject(context.Background(), "v1", "api.example.com", 8080, "/")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.MatchedPort != nil {
+		t.Fatalf("expected MatchedPort=nil (any port), got %v", res.MatchedPort)
 	}
 }
 
@@ -733,11 +821,85 @@ func TestInject_CredentialKeysIncludesSubstitution(t *testing.T) {
 	// No SID credential → expect ErrCredentialMissing, but CredentialKeys
 	// must already be populated for diagnostic logging.
 	p := NewStoreCredentialProvider(f, key32)
-	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", "/")
+	res, err := p.Inject(context.Background(), "v1", "api.twilio.com", 0, "/")
 	if !errors.Is(err, ErrCredentialMissing) {
 		t.Fatalf("expected ErrCredentialMissing, got %v", err)
 	}
 	if res == nil || len(res.CredentialKeys) != 2 {
 		t.Fatalf("expected CredentialKeys to include both auth and substitution keys, got %+v", res)
+	}
+}
+
+// fakeDynamicResolver satisfies DynamicCredentialResolver.
+type fakeDynamicResolver struct {
+	val   string
+	ok    bool
+	err   error
+	calls int
+}
+
+func (f *fakeDynamicResolver) Resolve(_ context.Context, _, _ string) (string, bool, error) {
+	f.calls++
+	return f.val, f.ok, f.err
+}
+
+func TestInject_DynamicFallback_Resolves(t *testing.T) {
+	key32 := make32(0x22)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{{
+		Host: "db.example.com",
+		Auth: broker.Auth{Type: "bearer", Token: "DB_POSTGRES_PASSWORD"},
+	}})
+	// No static credential set → GetCredential misses, falls through to dynamic.
+	dyn := &fakeDynamicResolver{val: "leased-pw", ok: true}
+
+	p := NewStoreCredentialProvider(f, key32)
+	p.Dynamic = dyn
+
+	res, err := p.Inject(context.Background(), "v1", "db.example.com", 0, "/")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.Headers["Authorization"] != "Bearer leased-pw" {
+		t.Fatalf("got Authorization=%q", res.Headers["Authorization"])
+	}
+	if dyn.calls != 1 {
+		t.Fatalf("expected dynamic resolver called once, got %d", dyn.calls)
+	}
+}
+
+func TestInject_DynamicFallback_NotDynamic_StillMissing(t *testing.T) {
+	key32 := make32(0x22)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{{
+		Host: "db.example.com",
+		Auth: broker.Auth{Type: "bearer", Token: "DB_POSTGRES_PASSWORD"},
+	}})
+	dyn := &fakeDynamicResolver{ok: false} // not a dynamic credential
+
+	p := NewStoreCredentialProvider(f, key32)
+	p.Dynamic = dyn
+
+	_, err := p.Inject(context.Background(), "v1", "db.example.com", 0, "/")
+	if !errors.Is(err, ErrCredentialMissing) {
+		t.Fatalf("expected ErrCredentialMissing, got %v", err)
+	}
+}
+
+func TestInject_DynamicFallback_ErrorPropagates(t *testing.T) {
+	key32 := make32(0x22)
+	f := newFakeCredStore()
+	f.setServices(t, "v1", []broker.Service{{
+		Host: "db.example.com",
+		Auth: broker.Auth{Type: "bearer", Token: "DB_POSTGRES_PASSWORD"},
+	}})
+	dyn := &fakeDynamicResolver{err: errors.New("infisical down")}
+
+	p := NewStoreCredentialProvider(f, key32)
+	p.Dynamic = dyn
+
+	_, err := p.Inject(context.Background(), "v1", "db.example.com", 0, "/")
+	if err == nil {
+		t.Fatalf("expected error to propagate")
 	}
 }

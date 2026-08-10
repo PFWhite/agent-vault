@@ -24,6 +24,8 @@ const emailVerificationTTL = 15 * time.Minute
 
 const maxPendingVerifications = 3
 
+const registerUniformMessage = "If this email is not already registered, a verification code has been sent."
+
 // generateAndSendVerificationCode creates a new 6-digit verification code for
 // the given email and sends it via email (or logs to stderr if SMTP is not configured).
 func (s *Server) generateAndSendVerificationCode(ctx context.Context, email string) (bool, error) {
@@ -105,25 +107,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			"email":                 req.Email,
 			"requires_verification": true,
 			"email_sent":            s.notifier.Enabled(),
-			"message":               "If this email is not already registered, a verification code has been sent.",
+			"message":               registerUniformMessage,
 		})
 		return
 	}
 
-	hash, salt, kdfParams, err := auth.HashUserPassword([]byte(req.Password))
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "Failed to hash password")
-		return
-	}
-
-	// If an inactive user exists, update their password and resend verification.
+	// If an inactive user exists, resend a verification code but do NOT
+	// overwrite their password — that would let an unauthenticated attacker
+	// silently replace the password before the legitimate user verifies.
 	if existing != nil && !existing.IsActive {
-		if err := s.store.UpdateUserPassword(ctx, existing.ID, hash, salt, kdfParams.Time, kdfParams.Memory, kdfParams.Threads); err != nil {
-			jsonError(w, http.StatusInternalServerError, "Failed to update account")
-			return
-		}
-
-		emailSent, err := s.generateAndSendVerificationCode(ctx, req.Email)
+		_, err := s.generateAndSendVerificationCode(ctx, req.Email)
 		if errors.Is(err, errTooManyPendingCodes) {
 			jsonError(w, http.StatusTooManyRequests, "Too many pending verification codes")
 			return
@@ -133,17 +126,18 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		msg := "Account updated. Ask your Agent Vault instance owner for the verification code."
-		if emailSent {
-			msg = "Account updated. Check your email for a new verification code."
-		}
-
 		jsonCreated(w, map[string]interface{}{
-			"email":                 existing.Email,
+			"email":                 req.Email,
 			"requires_verification": true,
-			"email_sent":            emailSent,
-			"message":               msg,
+			"email_sent":            s.notifier.Enabled(),
+			"message":               registerUniformMessage,
 		})
+		return
+	}
+
+	hash, salt, kdfParams, err := auth.HashUserPassword([]byte(req.Password))
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "Failed to hash password")
 		return
 	}
 
@@ -170,6 +164,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		http.SetCookie(w, sessionCookie(r, s.baseURL, session.ID, int(userSessionAbsoluteTTL.Seconds())))
 
+		s.captureEvent(r, "av.register", nil, map[string]string{"email": req.Email, "role": "owner"})
 		jsonCreated(w, registerResponse{
 			Email:                user.Email,
 			Role:                 "owner",
@@ -215,6 +210,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		msg = "Account created. Check your email for a verification code."
 	}
 
+	s.captureEvent(r, "av.register", nil, map[string]string{"email": req.Email, "role": "member"})
 	jsonCreated(w, map[string]interface{}{
 		"email":                 req.Email,
 		"requires_verification": true,
@@ -620,11 +616,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limit by IP and by email (reject if either bucket is full).
+	// Rate limit by IP (read-only peek — the ipAuth middleware already
+	// recorded this request) and by email (reject if either is full).
 	// Normalize the email key so case/whitespace variations don't
 	// let an attacker bypass the email bucket for a legitimate user.
 	ip := clientIP(r)
-	ipDecision := s.rateLimit.Allow(ratelimit.TierAuth, "ip:"+ip)
+	ipDecision := s.rateLimit.Check(ratelimit.TierAuth, "ip:"+ip)
 	emailDecision := s.rateLimit.Allow(ratelimit.TierAuth, "email:"+strings.ToLower(strings.TrimSpace(req.Email)))
 	if !ipDecision.Allow || !emailDecision.Allow {
 		d := ipDecision
@@ -665,6 +662,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, sessionCookie(r, s.baseURL, session.ID, int(userSessionAbsoluteTTL.Seconds())))
 
+	s.captureEvent(r, "av.login", nil, map[string]string{"email": user.Email})
 	jsonOK(w, loginResponse{
 		Token:     session.ID,
 		ExpiresAt: formatExpiresAt(session.ExpiresAt),

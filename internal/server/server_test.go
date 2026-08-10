@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Infisical/agent-vault/internal/auth"
+	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/infisical"
 	"github.com/Infisical/agent-vault/internal/notify"
@@ -32,19 +33,20 @@ type mockStore struct {
 	masterKeyRecord    *store.MasterKeyRecord
 	sessions           map[string]*store.Session
 	vaults             map[string]*store.Vault
-	credentials        map[string]*store.Credential             // keyed by "vaultID:key"
-	brokerConfigs      map[string]*store.BrokerConfig       // keyed by vaultID
-	proposals          map[string][]store.Proposal           // keyed by vaultID
-	users              map[string]*store.User                // keyed by email
-	grants             map[string]map[string]string          // keyed by userID -> vaultID -> role
-	userInvites        map[string]*store.UserInvite           // keyed by token
+	credentials        map[string]*store.Credential   // keyed by "vaultID:key"
+	brokerConfigs      map[string]*store.BrokerConfig // keyed by vaultID
+	proposals          map[string][]store.Proposal    // keyed by vaultID
+	users              map[string]*store.User         // keyed by email
+	grants             map[string]map[string]string   // keyed by userID -> vaultID -> role
+	userInvites        map[string]*store.UserInvite   // keyed by token
 	emailVerifications []*store.EmailVerification
 	passwordResets     []*store.PasswordReset
-	agents             map[string]*store.Agent               // keyed by name
-	agentVaultGrants   []store.VaultGrant                    // agent vault grants
-	settings           map[string]string                     // instance settings
-	vaultSettings      map[string]map[string]string          // per-vault: vaultID -> key -> value
+	agents             map[string]*store.Agent                // keyed by name
+	agentVaultGrants   []store.VaultGrant                     // agent vault grants
+	settings           map[string]string                      // instance settings
+	vaultSettings      map[string]map[string]string           // per-vault: vaultID -> key -> value
 	credStores         map[string]*store.VaultCredentialStore // per-vault external credential store config
+	unmatchedHosts     map[string][]store.UnmatchedHost       // keyed by vaultID
 	sessionCounter     int
 }
 
@@ -244,11 +246,11 @@ func (m *mockStore) GetVault(_ context.Context, name string) (*store.Vault, erro
 
 func (m *mockStore) SetCredential(_ context.Context, vaultID, key string, ciphertext, nonce []byte) (*store.Credential, error) {
 	s := &store.Credential{
-		ID:          "credential-" + key,
-		VaultID: vaultID,
-		Key:         key,
-		Ciphertext:  ciphertext,
-		Nonce:       nonce,
+		ID:         "credential-" + key,
+		VaultID:    vaultID,
+		Key:        key,
+		Ciphertext: ciphertext,
+		Nonce:      nonce,
 	}
 	m.credentials[vaultID+":"+key] = s
 	return s, nil
@@ -305,15 +307,15 @@ func (m *mockStore) CreateProposal(_ context.Context, vaultID, sessionID, servic
 	existing := m.proposals[vaultID]
 	nextID := len(existing) + 1
 	cs := store.Proposal{
-		ID:          nextID,
-		VaultID: vaultID,
-		SessionID:   sessionID,
-		Status:      "pending",
-		ServicesJSON:   servicesJSON,
+		ID:              nextID,
+		VaultID:         vaultID,
+		SessionID:       sessionID,
+		Status:          "pending",
+		ServicesJSON:    servicesJSON,
 		CredentialsJSON: credentialsJSON,
-		Message:     message,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Message:         message,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
 	}
 	m.proposals[vaultID] = append(m.proposals[vaultID], cs)
 	return &cs, nil
@@ -365,7 +367,7 @@ func (m *mockStore) GetProposalCredentials(_ context.Context, vaultID string, pr
 	return map[string]store.EncryptedCredential{}, nil
 }
 
-func (m *mockStore) ApplyProposal(_ context.Context, vaultID string, proposalID int, mergedServicesJSON string, credentials map[string]store.EncryptedCredential, deleteCredentialKeys []string) error {
+func (m *mockStore) ApplyProposal(_ context.Context, vaultID string, proposalID int, mergedServicesJSON string, credentials map[string]store.EncryptedCredential, deleteCredentialKeys []string, _ []store.OAuthCredentialConfig) error {
 	// Update proposal status to applied.
 	css := m.proposals[vaultID]
 	for i, cs := range css {
@@ -377,8 +379,8 @@ func (m *mockStore) ApplyProposal(_ context.Context, vaultID string, proposalID 
 	}
 	// Update broker config.
 	m.brokerConfigs[vaultID] = &store.BrokerConfig{
-		VaultID: vaultID,
-		ServicesJSON:   mergedServicesJSON,
+		VaultID:      vaultID,
+		ServicesJSON: mergedServicesJSON,
 	}
 	return nil
 }
@@ -387,7 +389,15 @@ func (m *mockStore) ExpirePendingProposals(_ context.Context, before time.Time) 
 	return 0, nil
 }
 
-func (m *mockStore) Close() error { return nil }
+func (m *mockStore) Close() error                                     { return nil }
+func (m *mockStore) Ping(_ context.Context) error                      { return nil }
+func (m *mockStore) DialectName() string                               { return "sqlite" }
+func (m *mockStore) GetCAState(_ context.Context) (*store.CAState, error) { return nil, nil }
+func (m *mockStore) SetCAState(_ context.Context, _ *store.CAState) error { return nil }
+
+func (m *mockStore) LockVault(_ context.Context, _ string) (func(), error) {
+	return func() {}, nil
+}
 
 // --- Request log stubs (unused in server tests; storage-level tests
 // live in the store package). ---
@@ -398,6 +408,10 @@ func (m *mockStore) InsertRequestLogs(_ context.Context, _ []store.RequestLog) e
 
 func (m *mockStore) ListRequestLogs(_ context.Context, _ store.ListRequestLogsOpts) ([]store.RequestLog, error) {
 	return nil, nil
+}
+
+func (m *mockStore) ListUnmatchedHosts(_ context.Context, vaultID string) ([]store.UnmatchedHost, error) {
+	return m.unmatchedHosts[vaultID], nil
 }
 
 func (m *mockStore) DeleteOldRequestLogs(_ context.Context, _ time.Time) (int64, error) {
@@ -419,6 +433,15 @@ func (m *mockStore) GetUserByID(_ context.Context, id string) (*store.User, erro
 		}
 	}
 	return nil, fmt.Errorf("user not found")
+}
+
+func (m *mockStore) GetUserEmailByID(_ context.Context, id string) (string, error) {
+	for _, u := range m.users {
+		if u.ID == id {
+			return u.Email, nil
+		}
+	}
+	return "", fmt.Errorf("user not found")
 }
 
 func (m *mockStore) ListUsers(_ context.Context) ([]store.User, error) {
@@ -462,7 +485,6 @@ func (m *mockStore) DeleteUser(_ context.Context, userID string) error {
 	}
 	return fmt.Errorf("user not found")
 }
-
 
 func (m *mockStore) DeleteUserSessions(_ context.Context, userID string) error {
 	for id, sess := range m.sessions {
@@ -519,11 +541,11 @@ func (m *mockStore) RenameVault(_ context.Context, oldName string, newName strin
 
 func (m *mockStore) SetBrokerConfig(_ context.Context, vaultID, servicesJSON string) (*store.BrokerConfig, error) {
 	bc := &store.BrokerConfig{
-		ID:          "bc-" + vaultID,
-		VaultID: vaultID,
-		ServicesJSON:   servicesJSON,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:           "bc-" + vaultID,
+		VaultID:      vaultID,
+		ServicesJSON: servicesJSON,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 	m.brokerConfigs[vaultID] = bc
 	return bc, nil
@@ -923,6 +945,15 @@ func (m *mockStore) GetAgentByID(_ context.Context, id string) (*store.Agent, er
 	return nil, fmt.Errorf("agent not found")
 }
 
+func (m *mockStore) GetAgentNameByID(_ context.Context, id string) (string, error) {
+	for _, ag := range m.agents {
+		if ag.ID == id {
+			return ag.Name, nil
+		}
+	}
+	return "", fmt.Errorf("agent not found")
+}
+
 func (m *mockStore) UpdateAgentRole(_ context.Context, agentID, role string) error {
 	for _, ag := range m.agents {
 		if ag.ID == agentID {
@@ -970,6 +1001,21 @@ func (m *mockStore) RevokeAgent(_ context.Context, id string) error {
 			now := time.Now()
 			ag.RevokedAt = &now
 			// Cascade delete sessions
+			for sid, sess := range m.sessions {
+				if sess.AgentID == id {
+					delete(m.sessions, sid)
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("agent not found")
+}
+
+func (m *mockStore) DeleteAgent(_ context.Context, id string) error {
+	for name, ag := range m.agents {
+		if ag.ID == id {
+			delete(m.agents, name)
 			for sid, sess := range m.sessions {
 				if sess.AgentID == id {
 					delete(m.sessions, sid)
@@ -1029,6 +1075,13 @@ func (m *mockStore) DeleteAgentTokens(_ context.Context, agentID string) error {
 func (m *mockStore) RotateAgentToken(ctx context.Context, agentID string, expiresAt *time.Time) (*store.Session, error) {
 	if err := m.DeleteAgentTokens(ctx, agentID); err != nil {
 		return nil, err
+	}
+	for _, ag := range m.agents {
+		if ag.ID == agentID {
+			ag.Status = "active"
+			ag.RevokedAt = nil
+			break
+		}
 	}
 	return m.CreateAgentToken(ctx, agentID, expiresAt)
 }
@@ -1121,8 +1174,56 @@ func (m *mockStore) UpdateVaultCredentialStoreHealth(_ context.Context, vaultID,
 	cs.LastSyncedAt = &t
 	return nil
 }
-func (m *mockStore) ReplaceVaultCredentials(_ context.Context, _ string, _ []store.EncryptedKV) error {
+func (m *mockStore) ReplaceVaultCredentialsForSync(_ context.Context, _, _ string, _ []store.EncryptedKV) (bool, error) {
+	return true, nil
+}
+func (m *mockStore) SetVaultExternalStore(_ context.Context, p store.SetVaultExternalStoreParams) (*store.VaultCredentialStore, error) {
+	cs := &store.VaultCredentialStore{
+		VaultID:             p.VaultID,
+		Kind:                p.Kind,
+		ConfigJSON:          p.ConfigJSON,
+		PollIntervalSeconds: p.PollIntervalSeconds,
+		LastSyncStatus:      store.SyncStatusOK,
+	}
+	m.credStores[p.VaultID] = cs
+	return cs, nil
+}
+func (m *mockStore) DeleteVaultCredentialStore(_ context.Context, vaultID string) error {
+	delete(m.credStores, vaultID)
 	return nil
+}
+
+func (m *mockStore) InsertDynamicSecretLease(_ context.Context, _ store.DynamicSecretLease) error {
+	return nil
+}
+func (m *mockStore) DeleteDynamicSecretLease(_ context.Context, _ string) error { return nil }
+func (m *mockStore) ListDynamicSecretLeases(_ context.Context) ([]store.DynamicSecretLease, error) {
+	return nil, nil
+}
+
+func (m *mockStore) GetCredentialOAuth(_ context.Context, _, _ string) (*store.CredentialOAuth, error) {
+	return nil, nil
+}
+func (m *mockStore) SetCredentialOAuth(_ context.Context, _ *store.CredentialOAuth) error {
+	return nil
+}
+func (m *mockStore) UpdateCredentialOAuthTokens(_ context.Context, _, _ string, _, _, _, _ []byte, _ *time.Time) error {
+	return nil
+}
+func (m *mockStore) UpdateCredentialOAuthError(_ context.Context, _, _, _ string) error {
+	return nil
+}
+func (m *mockStore) CreateCredentialOAuthState(_ context.Context, _ *store.CredentialOAuthState) error {
+	return nil
+}
+func (m *mockStore) GetCredentialOAuthStateByHash(_ context.Context, _ string) (*store.CredentialOAuthState, error) {
+	return nil, nil
+}
+func (m *mockStore) DeleteCredentialOAuthState(_ context.Context, _ string) error {
+	return nil
+}
+func (m *mockStore) ExpireCredentialOAuthStates(_ context.Context, _ time.Time) (int, error) {
+	return 0, nil
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -2263,8 +2364,11 @@ func TestCredentialsListNoRevealBackwardCompat(t *testing.T) {
 	if len(resp.Keys) != 1 || resp.Keys[0] != "FOO" {
 		t.Fatalf("expected keys [FOO], got %v", resp.Keys)
 	}
-	if len(resp.Credentials) != 0 {
-		t.Fatalf("expected no credentials in non-reveal response, got %d", len(resp.Credentials))
+	if len(resp.Credentials) != 1 {
+		t.Fatalf("expected 1 credential entry with type info, got %d", len(resp.Credentials))
+	}
+	if resp.Credentials[0].Value != "" {
+		t.Fatalf("expected no value in non-reveal response, got %q", resp.Credentials[0].Value)
 	}
 }
 
@@ -2382,7 +2486,7 @@ func TestDiscoverSuccess(t *testing.T) {
 
 // TestDiscoverHealsLegacyUnnamedServices pins that /discover returns
 // auto-slugged Names for legacy entries persisted without `name`.
-// Agents identify services by Name (per skill_http.md); a blank Name
+// Agents identify services by Name (per skill_cli.md); a blank Name
 // here makes the service un-addressable until an unrelated write
 // triggers a heal elsewhere.
 func TestDiscoverHealsLegacyUnnamedServices(t *testing.T) {
@@ -2519,10 +2623,10 @@ func setupProposalTest(t *testing.T) (*Server, *mockStore, string) {
 
 	// Create a scoped session for the root vault.
 	sess := &store.Session{
-		ID:          "scoped-cs-token",
-		VaultID: "root-ns-id",
-		ExpiresAt:   tp(time.Now().Add(1 * time.Hour)),
-		CreatedAt:   time.Now(),
+		ID:        "scoped-cs-token",
+		VaultID:   "root-ns-id",
+		ExpiresAt: tp(time.Now().Add(1 * time.Hour)),
+		CreatedAt: time.Now(),
 	}
 	ms.sessions["scoped-cs-token"] = sess
 	return srv, ms, "scoped-cs-token"
@@ -2824,18 +2928,18 @@ func setupAdminProposalTest(t *testing.T) (*Server, *mockStore, string) {
 	// Seed a broker config and a pending proposal.
 	ms.proposals = make(map[string][]store.Proposal)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
-		VaultID: "root-ns-id",
-		ServicesJSON:   `[]`,
+		VaultID:      "root-ns-id",
+		ServicesJSON: `[]`,
 	}
 	ms.proposals["root-ns-id"] = []store.Proposal{
 		{
-			ID:          1,
-			VaultID: "root-ns-id",
-			Status:      "pending",
-			ServicesJSON:   `[{"action":"set","name":"example","host":"api.example.com","auth":{"type":"bearer","token":"MY_KEY"}}]`,
+			ID:              1,
+			VaultID:         "root-ns-id",
+			Status:          "pending",
+			ServicesJSON:    `[{"action":"set","name":"example","host":"api.example.com","auth":{"type":"bearer","token":"MY_KEY"}}]`,
 			CredentialsJSON: `[{"action":"set","key":"MY_KEY","description":"Example key"}]`,
-			Message:     "Add example API",
-			CreatedAt:   time.Now(),
+			Message:         "Add example API",
+			CreatedAt:       time.Now(),
 		},
 	}
 
@@ -2929,10 +3033,10 @@ func TestAdminProposalApproveRequiresAdminSession(t *testing.T) {
 
 	// Create a scoped (non-admin) session.
 	scopedSess := &store.Session{
-		ID:          "scoped-session",
-		VaultID: "root-ns-id",
-		ExpiresAt:   tp(time.Now().Add(time.Hour)),
-		CreatedAt:   time.Now(),
+		ID:        "scoped-session",
+		VaultID:   "root-ns-id",
+		ExpiresAt: tp(time.Now().Add(time.Hour)),
+		CreatedAt: time.Now(),
 	}
 	ms.sessions[scopedSess.ID] = scopedSess
 
@@ -3012,10 +3116,10 @@ func TestAdminProposalRejectRequiresAdminSession(t *testing.T) {
 	srv, ms, _ := setupAdminProposalTest(t)
 
 	scopedSess := &store.Session{
-		ID:          "scoped-session",
-		VaultID: "root-ns-id",
-		ExpiresAt:   tp(time.Now().Add(time.Hour)),
-		CreatedAt:   time.Now(),
+		ID:        "scoped-session",
+		VaultID:   "root-ns-id",
+		ExpiresAt: tp(time.Now().Add(time.Hour)),
+		CreatedAt: time.Now(),
 	}
 	ms.sessions[scopedSess.ID] = scopedSess
 
@@ -3166,6 +3270,151 @@ func TestVaultCreateExternalRequiresOwner(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for member, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func patchCredentialStore(t *testing.T, srv *Server, token, vault, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/vaults/"+vault+"/credential-store", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// Switching an external vault to built-in drops the credential-store row so
+// polling stops; the synced credentials are left behind (kept by the store).
+func TestVaultCredentialStoreSwitchToBuiltin(t *testing.T) {
+	ms, ownerToken := setupMockStoreWithSession(t)
+	ms.credStores["root-ns-id"] = &store.VaultCredentialStore{
+		VaultID: "root-ns-id", Kind: "infisical",
+		ConfigJSON: `{"project_id":"p","environment":"dev","secret_path":"/"}`,
+	}
+	srv := newTestServer(withStore(ms))
+
+	rec := patchCredentialStore(t, srv, ownerToken, "default", `{"kind":"builtin"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := ms.credStores["root-ns-id"]; ok {
+		t.Fatalf("expected credential-store row removed after switch to builtin")
+	}
+	var resp struct {
+		CredentialStore map[string]interface{} `json:"credential_store"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.CredentialStore["kind"] != store.CredentialStoreBuiltin {
+		t.Fatalf("want kind builtin, got %v", resp.CredentialStore)
+	}
+}
+
+// Only vault admins / instance owners may switch the store.
+func TestVaultCredentialStoreSwitchRequiresAdminOrOwner(t *testing.T) {
+	ms, _ := setupMockStoreWithSession(t)
+	memberToken := setupMemberSession(t, ms, "root-ns-id")
+	srv := newTestServer(withStore(ms))
+
+	rec := patchCredentialStore(t, srv, memberToken, "default", `{"kind":"builtin"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin member, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestVaultCredentialStoreSwitchInvalidKind(t *testing.T) {
+	ms, ownerToken := setupMockStoreWithSession(t)
+	srv := newTestServer(withStore(ms))
+
+	rec := patchCredentialStore(t, srv, ownerToken, "default", `{"kind":"bogus"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown kind, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Switching to Infisical when the server has no Infisical client must 503,
+// mirroring the create gate.
+func TestVaultCredentialStoreSwitchToInfisicalNoClient(t *testing.T) {
+	ms, ownerToken := setupMockStoreWithSession(t)
+	srv := newTestServer(withStore(ms)) // no AttachInfisical → infisicalClient nil
+
+	body := `{"kind":"infisical","config":{"project_id":"p","environment":"dev","secret_path":"/"},"poll_interval_seconds":60}`
+	rec := patchCredentialStore(t, srv, ownerToken, "default", body)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 without infisical client, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Connecting to Infisical is owner-only, mirroring vault create. A non-owner
+// vault admin must be rejected. The client is attached so this proves the owner
+// gate fires (403), not the no-client 503.
+func TestVaultCredentialStoreSwitchToInfisicalRequiresOwner(t *testing.T) {
+	ms, _ := setupMockStoreWithSession(t)
+	adminToken := setupMemberSession(t, ms, "root-ns-id")
+	// Promote to vault admin while leaving the instance role at "member".
+	ms.GrantVaultRole(context.Background(), "member-user-id", "user", "root-ns-id", "admin")
+	srv := newTestServer(withStore(ms))
+	srv.AttachInfisical(&infisical.Client{})
+
+	body := `{"kind":"infisical","config":{"project_id":"p","environment":"dev","secret_path":"/"},"poll_interval_seconds":60}`
+	rec := patchCredentialStore(t, srv, adminToken, "default", body)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-owner vault admin, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Disconnecting (switch to builtin) stays allowed for a non-owner vault admin —
+// only the connect path is owner-gated.
+func TestVaultCredentialStoreSwitchToBuiltinAllowsAdmin(t *testing.T) {
+	ms, _ := setupMockStoreWithSession(t)
+	adminToken := setupMemberSession(t, ms, "root-ns-id")
+	ms.GrantVaultRole(context.Background(), "member-user-id", "user", "root-ns-id", "admin")
+	ms.credStores["root-ns-id"] = &store.VaultCredentialStore{
+		VaultID: "root-ns-id", Kind: "infisical",
+		ConfigJSON: `{"project_id":"p","environment":"dev","secret_path":"/"}`,
+	}
+	srv := newTestServer(withStore(ms))
+
+	rec := patchCredentialStore(t, srv, adminToken, "default", `{"kind":"builtin"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for non-owner admin disconnect, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// infisical_available drives the Infisical option in the credential-store
+// switcher. Since connecting is owner-only, it must be reported owner-gated:
+// true for an owner, false for a non-owner vault admin, even with a client.
+func TestVaultSettingsInfisicalAvailableOwnerGated(t *testing.T) {
+	settingsAvailable := func(t *testing.T, srv *Server, token string) bool {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/settings", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("settings GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			InfisicalAvailable bool `json:"infisical_available"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.InfisicalAvailable
+	}
+
+	ms, ownerToken := setupMockStoreWithSession(t)
+	adminToken := setupMemberSession(t, ms, "root-ns-id")
+	ms.GrantVaultRole(context.Background(), "member-user-id", "user", "root-ns-id", "admin")
+	srv := newTestServer(withStore(ms))
+	srv.AttachInfisical(&infisical.Client{})
+
+	if !settingsAvailable(t, srv, ownerToken) {
+		t.Fatalf("expected infisical_available=true for owner")
+	}
+	if settingsAvailable(t, srv, adminToken) {
+		t.Fatalf("expected infisical_available=false for non-owner admin")
 	}
 }
 
@@ -3653,7 +3902,6 @@ func TestLastOwnerCannotBeRemoved(t *testing.T) {
 	}
 }
 
-
 func TestEmailTestRequiresOwner(t *testing.T) {
 	ms, agentToken := setupMockStoreWithScopedSession(t, "default", "root-ns-id")
 	srv := newTestServer(withStore(ms))
@@ -3963,6 +4211,31 @@ func TestAgentGet_NonOwnerCannotViewOthersAgent(t *testing.T) {
 	}
 }
 
+func TestAgentDelete(t *testing.T) {
+	srv, ms, sessID := setupAgentTest(t)
+
+	ms.agents["deletebot"] = &store.Agent{ID: "a1", Name: "deletebot", Status: "active"}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/agents/deletebot/delete", nil)
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, exists := ms.agents["deletebot"]; exists {
+		t.Fatal("expected agent to be hard-deleted from store")
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if msg, ok := resp["message"].(string); !ok || !strings.Contains(msg, "deleted") {
+		t.Fatalf("expected 'deleted' in message, got: %v", resp["message"])
+	}
+}
+
 func TestAgentRevoke(t *testing.T) {
 	srv, ms, sessID := setupAgentTest(t)
 
@@ -4004,6 +4277,60 @@ func TestAgentRotate(t *testing.T) {
 	}
 	if resp["rotated_at"] == nil || resp["rotated_at"].(string) == "" {
 		t.Fatal("expected non-empty rotated_at")
+	}
+}
+
+func TestAgentRotate_ReactivatesRevokedAgent(t *testing.T) {
+	srv, ms, sessID := setupAgentTest(t)
+
+	now := time.Now()
+	ms.agents["deadbot"] = &store.Agent{ID: "a1", Name: "deadbot", Status: "revoked", RevokedAt: &now}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/agents/deadbot/rotate", nil)
+	req.Header.Set("Authorization", "Bearer "+sessID)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	ag := ms.agents["deadbot"]
+	if ag.Status != "active" {
+		t.Fatalf("expected active after rotate, got %s", ag.Status)
+	}
+	if ag.RevokedAt != nil {
+		t.Fatal("expected revoked_at to be cleared")
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["av_agent_token"] == nil || resp["av_agent_token"].(string) == "" {
+		t.Fatal("expected non-empty av_agent_token")
+	}
+}
+
+func TestAgentRotate_MemberCannotRotateOwnerRoleAgent(t *testing.T) {
+	ms, _ := setupMockStoreWithSession(t)
+	memberToken := setupMemberSession(t, ms)
+	srv := newTestServer(withStore(ms))
+
+	// Agent created by the member but promoted to owner role.
+	ms.agents["admin-bot"] = &store.Agent{
+		ID: "a1", Name: "admin-bot", Status: "active",
+		Role: "owner", CreatedBy: "member-user-id",
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/agents/admin-bot/rotate", nil)
+	req.Header.Set("Authorization", "Bearer "+memberToken)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "owner-role agents") {
+		t.Errorf("expected owner-role error message, got: %s", rec.Body.String())
 	}
 }
 
@@ -5318,7 +5645,6 @@ func TestScopedSessionListRequiresAuth(t *testing.T) {
 	}
 }
 
-
 // setupMockStoreWithInactiveUser creates a mock store with an inactive (unverified) user.
 func setupMockStoreWithInactiveUser(t *testing.T, email, password string) *mockStore {
 	t.Helper()
@@ -5436,6 +5762,71 @@ func TestResendVerificationTooManyPending(t *testing.T) {
 	// No new verification should have been created.
 	if len(ms.emailVerifications) != 3 {
 		t.Fatalf("expected 3 email verifications, got %d", len(ms.emailVerifications))
+	}
+}
+
+// --- Re-registration Security Tests ---
+
+func TestReRegisterInactiveUserDoesNotOverwritePassword(t *testing.T) {
+	ms := setupMockStoreWithInactiveUser(t, "victim@test.com", "original-password")
+	srv := newTestServer(withStore(ms))
+
+	// Attacker re-registers with the victim's email and a different password.
+	regBody := `{"email":"victim@test.com","password":"attacker-password"}`
+	regRec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(regRec, httptest.NewRequest(http.MethodPost, "/v1/auth/register", strings.NewReader(regBody)))
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("re-register: expected 201, got %d: %s", regRec.Code, regRec.Body.String())
+	}
+
+	// A verification code should have been generated.
+	if len(ms.emailVerifications) != 1 {
+		t.Fatalf("expected 1 verification code, got %d", len(ms.emailVerifications))
+	}
+	code := ms.emailVerifications[0].Code
+
+	// Victim verifies with the code.
+	verifyBody := fmt.Sprintf(`{"email":"victim@test.com","code":"%s"}`, code)
+	verifyRec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(verifyRec, httptest.NewRequest(http.MethodPost, "/v1/auth/verify", strings.NewReader(verifyBody)))
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("verify: expected 200, got %d: %s", verifyRec.Code, verifyRec.Body.String())
+	}
+
+	// Login with original password should succeed.
+	loginOK := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(loginOK, httptest.NewRequest(http.MethodPost, "/v1/auth/login",
+		strings.NewReader(`{"email":"victim@test.com","password":"original-password"}`)))
+	if loginOK.Code != http.StatusOK {
+		t.Fatalf("login with original password: expected 200, got %d: %s", loginOK.Code, loginOK.Body.String())
+	}
+
+	// Login with attacker's password must fail.
+	loginFail := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(loginFail, httptest.NewRequest(http.MethodPost, "/v1/auth/login",
+		strings.NewReader(`{"email":"victim@test.com","password":"attacker-password"}`)))
+	if loginFail.Code != http.StatusUnauthorized {
+		t.Fatalf("login with attacker password: expected 401, got %d: %s", loginFail.Code, loginFail.Body.String())
+	}
+}
+
+func TestReRegisterInactiveUserUniformResponse(t *testing.T) {
+	ms := setupMockStoreWithInactiveUser(t, "existing@test.com", "password123")
+	srv := newTestServer(withStore(ms))
+
+	// Re-register an inactive account.
+	regBody := `{"email":"existing@test.com","password":"different-password"}`
+	regRec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(regRec, httptest.NewRequest(http.MethodPost, "/v1/auth/register", strings.NewReader(regBody)))
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", regRec.Code, regRec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(regRec.Body).Decode(&resp)
+
+	if resp["message"] != registerUniformMessage {
+		t.Fatalf("expected uniform message %q, got %q", registerUniformMessage, resp["message"])
 	}
 }
 
@@ -6726,4 +7117,391 @@ func TestSPACatchAllRoutes(t *testing.T) {
 			t.Fatalf("expected 404 for unregistered path, got %d: %s", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+// --- Discovered Hosts Tests ---
+
+func setupDiscoveredHostsTest(t *testing.T, servicesJSON string, hosts []store.UnmatchedHost) (*mockStore, string) {
+	t.Helper()
+	ms := newMockStore()
+
+	sess, err := ms.CreateScopedSession(context.Background(), store.CreateScopedSessionParams{
+		VaultID:   "root-ns-id",
+		VaultRole: "member",
+		ExpiresAt: tp(time.Now().Add(time.Hour)),
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedSession: %v", err)
+	}
+
+	if servicesJSON != "" {
+		ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
+			ID: "bc-1", VaultID: "root-ns-id", ServicesJSON: servicesJSON,
+		}
+	}
+
+	if ms.unmatchedHosts == nil {
+		ms.unmatchedHosts = make(map[string][]store.UnmatchedHost)
+	}
+	ms.unmatchedHosts["root-ns-id"] = hosts
+
+	return ms, sess.ID
+}
+
+func TestDiscoveredHostsBasic(t *testing.T) {
+	now := time.Now().UTC()
+	hosts := []store.UnmatchedHost{
+		{Host: "api.stripe.com:443", RequestCount: 10, LastSeen: now},
+		{Host: "api.openai.com:443", RequestCount: 5, LastSeen: now.Add(-1 * time.Minute)},
+		{Host: "hooks.slack.com:443", RequestCount: 2, LastSeen: now.Add(-5 * time.Minute)},
+	}
+
+	ms, token := setupDiscoveredHostsTest(t, "", hosts)
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/discovered-hosts", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Hosts []struct {
+			Host         string `json:"host"`
+			RequestCount int    `json:"request_count"`
+			LastSeen     string `json:"last_seen"`
+		} `json:"hosts"`
+		Total int `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Total != 3 {
+		t.Fatalf("expected total=3, got %d", resp.Total)
+	}
+	if len(resp.Hosts) != 3 {
+		t.Fatalf("expected 3 hosts, got %d", len(resp.Hosts))
+	}
+	// Port-stripped hostnames
+	if resp.Hosts[0].Host != "api.stripe.com" {
+		t.Errorf("expected first host api.stripe.com, got %q", resp.Hosts[0].Host)
+	}
+	if resp.Hosts[0].RequestCount != 10 {
+		t.Errorf("expected 10 requests, got %d", resp.Hosts[0].RequestCount)
+	}
+}
+
+func TestDiscoveredHostsFilterConfiguredService(t *testing.T) {
+	now := time.Now().UTC()
+	hosts := []store.UnmatchedHost{
+		{Host: "api.stripe.com:443", RequestCount: 10, LastSeen: now},
+		{Host: "api.github.com:443", RequestCount: 5, LastSeen: now.Add(-1 * time.Minute)},
+		{Host: "raw.github.com:443", RequestCount: 3, LastSeen: now.Add(-2 * time.Minute)},
+		{Host: "hooks.slack.com:443", RequestCount: 2, LastSeen: now.Add(-3 * time.Minute)},
+	}
+
+	servicesJSON := `[{"name":"github","host":"*.github.com","auth":{"type":"bearer","token":"GH_TOKEN"}},{"name":"stripe","host":"api.stripe.com/v1/*","auth":{"type":"bearer","token":"STRIPE_KEY"}}]`
+	ms, token := setupDiscoveredHostsTest(t, servicesJSON, hosts)
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/discovered-hosts?limit=100", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Hosts []struct {
+			Host string `json:"host"`
+		} `json:"hosts"`
+		Total int `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// api.stripe.com filtered (host-only match against api.stripe.com/v1/*),
+	// api.github.com and raw.github.com filtered (wildcard *.github.com),
+	// only hooks.slack.com remains
+	if resp.Total != 1 {
+		t.Fatalf("expected total=1, got %d (hosts: %+v)", resp.Total, resp.Hosts)
+	}
+	if resp.Hosts[0].Host != "hooks.slack.com" {
+		t.Errorf("expected hooks.slack.com, got %q", resp.Hosts[0].Host)
+	}
+}
+
+func TestDiscoveredHostsPortDedup(t *testing.T) {
+	now := time.Now().UTC()
+	hosts := []store.UnmatchedHost{
+		{Host: "api.stripe.com:443", RequestCount: 10, LastSeen: now},
+		{Host: "api.stripe.com:80", RequestCount: 3, LastSeen: now.Add(-1 * time.Minute)},
+	}
+
+	ms, token := setupDiscoveredHostsTest(t, "", hosts)
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/discovered-hosts", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	var resp struct {
+		Hosts []struct {
+			Host         string `json:"host"`
+			RequestCount int    `json:"request_count"`
+		} `json:"hosts"`
+		Total int `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Total != 1 {
+		t.Fatalf("expected total=1 (deduped), got %d", resp.Total)
+	}
+	if resp.Hosts[0].Host != "api.stripe.com" {
+		t.Errorf("expected api.stripe.com, got %q", resp.Hosts[0].Host)
+	}
+	if resp.Hosts[0].RequestCount != 13 {
+		t.Errorf("expected 13 (10+3 merged), got %d", resp.Hosts[0].RequestCount)
+	}
+}
+
+func TestDiscoveredHostsLimitZeroCountOnly(t *testing.T) {
+	now := time.Now().UTC()
+	hosts := []store.UnmatchedHost{
+		{Host: "a.com:443", RequestCount: 1, LastSeen: now},
+		{Host: "b.com:443", RequestCount: 1, LastSeen: now},
+	}
+
+	ms, token := setupDiscoveredHostsTest(t, "", hosts)
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/discovered-hosts?limit=0", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	var resp struct {
+		Hosts []struct{ Host string } `json:"hosts"`
+		Total int                     `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Total != 2 {
+		t.Fatalf("expected total=2, got %d", resp.Total)
+	}
+	if len(resp.Hosts) != 0 {
+		t.Fatalf("expected empty hosts array for limit=0, got %d", len(resp.Hosts))
+	}
+}
+
+func TestDiscoveredHostsLimitPagination(t *testing.T) {
+	now := time.Now().UTC()
+	var hosts []store.UnmatchedHost
+	for i := 0; i < 8; i++ {
+		hosts = append(hosts, store.UnmatchedHost{
+			Host: fmt.Sprintf("host-%d.com:443", i), RequestCount: 1,
+			LastSeen: now.Add(-time.Duration(i) * time.Minute),
+		})
+	}
+
+	ms, token := setupDiscoveredHostsTest(t, "", hosts)
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/discovered-hosts?limit=5", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	var resp struct {
+		Hosts []struct{ Host string } `json:"hosts"`
+		Total int                     `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Total != 8 {
+		t.Fatalf("expected total=8, got %d", resp.Total)
+	}
+	if len(resp.Hosts) != 5 {
+		t.Fatalf("expected 5 hosts with limit=5, got %d", len(resp.Hosts))
+	}
+}
+
+func TestDiscoveredHostsProxyRoleRejected(t *testing.T) {
+	ms := newMockStore()
+	sess, err := ms.CreateScopedSession(context.Background(), store.CreateScopedSessionParams{
+		VaultID:   "root-ns-id",
+		VaultRole: "proxy",
+		ExpiresAt: tp(time.Now().Add(time.Hour)),
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedSession: %v", err)
+	}
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/discovered-hosts", nil)
+	req.Header.Set("Authorization", "Bearer "+sess.ID)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for proxy role, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDiscoveredHostsNoBrokerConfig(t *testing.T) {
+	now := time.Now().UTC()
+	hosts := []store.UnmatchedHost{
+		{Host: "api.stripe.com:443", RequestCount: 5, LastSeen: now},
+	}
+
+	ms, token := setupDiscoveredHostsTest(t, "", hosts)
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vaults/default/discovered-hosts", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Hosts []struct{ Host string } `json:"hosts"`
+		Total int                     `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// No broker config = no services to filter against, all hosts pass through
+	if resp.Total != 1 {
+		t.Fatalf("expected total=1, got %d", resp.Total)
+	}
+}
+
+// TestCredentialProvider_LateBindsDynamicResolver reproduces the MITM-ordering
+// bug: attachMITMIfEnabled captures the provider before Start() builds
+// s.infisicalDynamic. The captured provider must observe the resolver once it
+// is assigned, so dynamic secrets resolve through the proxy like static ones.
+func TestCredentialProvider_LateBindsDynamicResolver(t *testing.T) {
+	srv := newTestServer()
+
+	// Capture at "attach time", while infisicalDynamic is still nil.
+	cp := srv.CredentialProvider()
+	p, ok := cp.(*brokercore.StoreCredentialProvider)
+	if !ok {
+		t.Fatalf("expected *brokercore.StoreCredentialProvider, got %T", cp)
+	}
+	adapter, ok := p.Dynamic.(lateDynamicResolver)
+	if !ok {
+		t.Fatalf("expected lateDynamicResolver, got %T", p.Dynamic)
+	}
+	// The adapter holds the live Server and reads s.infisicalDynamic per call,
+	// so it can never go stale against the field Start() assigns later.
+	if adapter.s != srv {
+		t.Fatal("adapter not bound to the server")
+	}
+
+	// Pre-bind: infisicalDynamic is nil, so the adapter reports "not dynamic"
+	// without panicking (the typed-nil trap the old snapshot guarded against).
+	if _, ok, err := p.Dynamic.Resolve(context.Background(), "v1", "SOME_KEY"); ok || err != nil {
+		t.Fatalf("pre-bind: expected ok=false err=nil, got ok=%v err=%v", ok, err)
+	}
+
+	// Start() later assigns the resolver; the already-captured provider must
+	// reach it. A configured resolver over a non-Infisical vault still returns
+	// ok=false, but it now flows through s.infisicalDynamic rather than the nil
+	// short-circuit, proving the live read.
+	srv.infisicalDynamic = infisical.NewDynamicResolver(srv.store, nil, slog.New(slog.DiscardHandler))
+	if _, ok, err := p.Dynamic.Resolve(context.Background(), "v1", "SOME_KEY"); ok || err != nil {
+		t.Fatalf("post-bind: expected ok=false err=nil, got ok=%v err=%v", ok, err)
+	}
+}
+
+func TestVaultLeaveMemberSuccess(t *testing.T) {
+	ms, _ := setupMockStoreWithSession(t)
+	memberToken := setupMemberSession(t, ms, "root-ns-id")
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/vaults/default/leave", nil)
+	req.Header.Set("Authorization", "Bearer "+memberToken)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	has, _ := ms.HasVaultAccess(context.Background(), "member-user-id", "root-ns-id")
+	if has {
+		t.Fatal("expected member to no longer have vault access after leaving")
+	}
+}
+
+func TestVaultLeaveLastAdminBlocked(t *testing.T) {
+	ms, ownerToken := setupMockStoreWithSession(t)
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/vaults/default/leave", nil)
+	req.Header.Set("Authorization", "Bearer "+ownerToken)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestVaultLeaveAdminWithOtherAdmins(t *testing.T) {
+	ms, ownerToken := setupMockStoreWithSession(t)
+	// Add a second admin so the owner can leave.
+	ms.users["admin2@test.com"] = &store.User{
+		ID: "admin2-user-id", Email: "admin2@test.com", Role: "member", IsActive: true,
+	}
+	ms.GrantVaultRole(context.Background(), "admin2-user-id", "user", "root-ns-id", "admin")
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/vaults/default/leave", nil)
+	req.Header.Set("Authorization", "Bearer "+ownerToken)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	has, _ := ms.HasVaultAccess(context.Background(), "owner-user-id", "root-ns-id")
+	if has {
+		t.Fatal("expected owner to no longer have vault access after leaving")
+	}
+}
+
+func TestVaultLeaveNoAccess(t *testing.T) {
+	ms, _ := setupMockStoreWithSession(t)
+	memberToken := setupMemberSession(t, ms) // no vault grants
+	srv := newTestServer(withStore(ms))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/vaults/default/leave", nil)
+	req.Header.Set("Authorization", "Bearer "+memberToken)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
 }

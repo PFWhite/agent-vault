@@ -237,6 +237,8 @@ func (s *Server) handleProposalCreate(w http.ResponseWriter, r *http.Request) {
 		go s.notifyProposalCreated(vaultID, nsName, cs.ID, req.Message, approvalURL, proposalAgentName) //nolint:gosec // G118: intentional fire-and-forget goroutine
 	}
 
+	actor, _ := s.actorFromSession(ctx, sess)
+	s.captureEvent(r, "av.proposal-create", actor, map[string]string{"vault": nsName})
 	jsonCreated(w, map[string]interface{}{
 		"id":           cs.ID,
 		"status":       cs.Status,
@@ -440,9 +442,28 @@ func (s *Server) handleAdminProposalApprove(w http.ResponseWriter, r *http.Reque
 	// Resolve final credential values for set slots; collect keys for delete slots.
 	finalCredentials := make(map[string]store.EncryptedCredential)
 	var deleteCredentialKeys []string
+	var oauthConfigs []store.OAuthCredentialConfig
 	for _, slot := range credentialSlots {
 		if slot.Action == proposal.ActionDelete {
 			deleteCredentialKeys = append(deleteCredentialKeys, slot.Key)
+			continue
+		}
+
+		// OAuth credentials: tokens come from the connect flow or token
+		// upload, not from the approval request. Build an OAuthCredentialConfig
+		// and let ApplyProposal handle the credential row.
+		if slot.Type == "oauth" && slot.OAuth != nil {
+			oc := store.OAuthCredentialConfig{
+				Key:              slot.Key,
+				AuthorizationURL: slot.OAuth.AuthorizationURL,
+				TokenURL:         slot.OAuth.TokenURL,
+				ClientID:         slot.OAuth.ClientID,
+				Scopes:           slot.OAuth.Scopes,
+				ScopeSeparator:   slot.OAuth.ScopeSeparator,
+				DisablePKCE:      slot.OAuth.DisablePKCE,
+				TokenAuthMethod:  slot.OAuth.TokenAuthMethod,
+			}
+			oauthConfigs = append(oauthConfigs, oc)
 			continue
 		}
 
@@ -487,7 +508,12 @@ func (s *Server) handleAdminProposalApprove(w http.ResponseWriter, r *http.Reque
 	// proposed entries against current existing state using the same
 	// helper as the create path. The lock serializes load → merge →
 	// apply against concurrent direct upserts on /services.
-	defer s.lockVaultServices(ns.ID)()
+	unlock, err := s.lockVaultServices(ctx, ns.ID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "lock failed")
+		return
+	}
+	defer unlock()
 
 	existingServices, err := s.loadServices(ctx, ns.ID)
 	if err != nil {
@@ -512,7 +538,7 @@ func (s *Server) handleAdminProposalApprove(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Apply atomically.
-	if err := s.store.ApplyProposal(ctx, ns.ID, cs.ID, string(mergedJSON), finalCredentials, deleteCredentialKeys); err != nil {
+	if err := s.store.ApplyProposal(ctx, ns.ID, cs.ID, string(mergedJSON), finalCredentials, deleteCredentialKeys, oauthConfigs); err != nil {
 		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to apply proposal: %v", err))
 		return
 	}

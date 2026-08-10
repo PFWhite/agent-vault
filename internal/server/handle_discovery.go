@@ -55,10 +55,10 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	// MarshalJSON persists Host in joined form; re-split so
 	// MatcherPattern emits the same shape regardless of storage form.
 	for i := range svcList {
-		svcList[i].Host, svcList[i].Path = broker.SplitInlineHost(svcList[i].Host, svcList[i].Path)
+		svcList[i].Host, svcList[i].Path, svcList[i].Port = broker.SplitInlineHost(svcList[i].Host, svcList[i].Path)
 	}
 	// Heal legacy unnamed entries on the agent-facing read path too —
-	// agents identify services by Name (per skill_http.md) and a blank
+	// agents identify services by Name (per skill_cli.md) and a blank
 	// Name in this response makes the service un-addressable.
 	broker.AssignSlugNames(svcList)
 

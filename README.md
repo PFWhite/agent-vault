@@ -14,7 +14,7 @@ Agents should not possess credentials. Agent Vault eliminates credential exfiltr
 </p>
 
 <p align="center">
-<a href="https://docs.agent-vault.dev">Documentation</a> | <a href="https://docs.agent-vault.dev/installation">Installation</a> | <a href="https://docs.agent-vault.dev/tutorial">Tutorial</a> | <a href="https://youtu.be/6dERVjLk0-Q">Video Demo</a> | <a href="https://infisical.com/slack">Slack</a>
+<a href="https://docs.agent-vault.dev">Documentation</a> | <a href="https://docs.agent-vault.dev/installation">Installation</a> | <a href="https://docs.agent-vault.dev/tutorial">Tutorial</a> | <a href="https://youtu.be/AkyMmDSX8b4">Video Demo</a> | <a href="https://infisical.com/slack">Slack</a>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ Agent Vault was created to solve credential exfiltration for all AI agents. Inst
 Features:
 
 - **Credential Brokering**: Broker AI agents access target services like LLM providers and GitHub without them holding any real credentials. Agent Vault is able to broker that access by substituting dummy values in headers like `__anthropic_api_key__` with real credentials or replacing auth headers entirely on outbound requests through it.
-- **Pluggable Credential Stores**: Back a vault with an external system like [Infisical](https://infisical.com) instead of the local encrypted store. Set `INFISICAL_URL` and create vaults with `--credential-store=infisical`. See [docs/learn/credential-stores](docs/learn/credential-stores.mdx).
+- **[Pluggable Credential Stores](docs/learn/credential-stores.mdx)**: Back a vault with an external secrets store like [Infisical](https://infisical.com) instead of the local encrypted store. This extends the capabilities of Agent Vault to include features like [dynamic secrets](https://infisical.com/docs/documentation/platform/dynamic-secrets/overview) from Infisical.
 - **Transparent Integration**: Let AI agents use existing tools like MCP, CLI, SDK, API with all underlying requests automatically routed through Agent Vault. Agent Vault takes an interface-agnostic, non-invasive approach to credential brokering by bootstrapping your agents' environment to use `HTTPS_PROXY` and be compatible with Agent Vault's MITM architecture.
 - **Purpose-Built Design**: Existing forward proxies like `mitmproxy` or `squid` require modification to perform credential brokering and integrate well with agents. Agent Vault is purpose-built to work with the ergonomics of all types of agent use-cases with a dedicated CLI, multi-tenancy, and agent-specific roadmap backed by [Infisical](https://github.com/Infisical/infisical).
 - **Egress Filtering**: Control which agents should have access to which services and API endpoints on them since authenticated requests flow through Agent Vault.
@@ -39,6 +39,15 @@ Features:
 By default, requests not matching any service forward as plain proxy traffic; flip a vault into strict deny mode (`unmatched_host_policy=deny`) to reject them with 403 instead.
 
 Read the full backstory behind Agent Vault [here](https://infisical.com/blog/agent-vault-the-open-source-credential-proxy-and-vault-for-agents).
+
+## Agent Vault and Infisical Agent Proxy
+
+[Infisical](https://infisical.com) offers two ways to broker credentials to agents.
+
+- **Agent Vault** is the simpler, self-contained option: a single open-source binary that stores credentials itself and runs entirely on infrastructure you control, with no dependency on any other system.
+- **[Infisical Agent Proxy](https://infisical.com/blog/agent-proxy)** is the commercial-grade option, built directly into Infisical. Your secrets, the services they are brokered to, and access control all live in one place, and it comes with everything Infisical supports around secrets management, including dynamic secrets, secret rotation, versioning, and more.
+
+For production and enterprise use cases we recommend Agent Proxy. It is part of Infisical Secrets Management and available on every plan, including the free one.
 
 ## Use Cases
 
@@ -104,7 +113,7 @@ docker run -it -p 14321:14321 -p 14322:14322 \
   -v agent-vault-data:/data infisical/agent-vault
 ```
 
-The server starts the HTTP API on port `14321` and a TLS-encrypted transparent HTTP/HTTPS proxy on port `14322`; the same listener handles `CONNECT` for `https://` upstreams and absolute-form forward-proxy requests for `http://` upstreams.
+The server starts the HTTP API on port `14321` and a transparent HTTP/HTTPS proxy on port `14322`; the same listener handles `CONNECT` for `https://` upstreams and absolute-form forward-proxy requests for `http://` upstreams.
 
 The web UI becomes available at `http://<host>:14321` and you'll be prompted to create the first user known as the instance **owner**.
 
@@ -128,6 +137,16 @@ ANTHROPIC_API_KEY=__anthropic_api_key__ // dummy key that will be substituted by
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh
 ```
 
+### Verifying downloaded release binaries
+
+Release archives published from this workflow ship with a build provenance attestation tied to the GitHub Actions run that produced them. Verify with the `gh` CLI (no extra tools, no key management):
+
+```bash
+gh attestation verify agent-vault_*.tar.gz --repo Infisical/agent-vault
+```
+
+`checksums.txt` is also covered by the same attestation, and its cosign signature continues to verify with `cosign verify-blob` for users who prefer that path.
+
 ```bash
 agent-vault run -- claude
 agent-vault vault run -- agent
@@ -150,15 +169,15 @@ There are many ways to deploy Agent Vault and integrate your AI agents with it. 
 
 ## See it in Action
 
-A full end-to-end walkthrough: running Hermes Agent on a remote VPS while Agent Vault brokers every outbound API call from a second box. Real credentials never touch the agent host.
+Watch how Agent Vault brokers credentials for AI agents: store your keys once, route every outbound request through the proxy, and let agents call real APIs without ever seeing a secret.
 
 <p align="center">
-  <a href="https://youtu.be/6dERVjLk0-Q">
-    <img src="assets/hermes-vps-video-thumbnail.png" alt="Watch: Run Hermes on a VPS without leaking your API keys" />
+  <a href="https://youtu.be/AkyMmDSX8b4">
+    <img src="assets/agent-vault-video-thumbnail.png" alt="Watch: agents shouldn't see your secrets" />
   </a>
 </p>
 
-Step-by-step companion guide: [Run Hermes on a VPS](https://docs.agent-vault.dev/guides/hermes-on-vps).
+Want a full deployment walkthrough? See [Run Hermes on a VPS](https://docs.agent-vault.dev/guides/hermes-on-vps) for an end-to-end example with a brokered agent on a separate box.
 
 ## Best Practices
 
@@ -170,6 +189,12 @@ Step-by-step companion guide: [Run Hermes on a VPS](https://docs.agent-vault.dev
 2. Latency: You should co-locate Agent Vault alongside your AI agents within the same network to reduce request latency.
 
 3. Tokens: You should create an [agent](https://docs.agent-vault.dev/agents/overview) in Agent Vault to represent a long-lived agent. For ephemeral sandboxes, you may prefer to mint short-lived, vault-scoped tokens for sandboxed agents to use to proxy requests through Agent Vault.
+
+## PostgreSQL (Production)
+
+By default Agent Vault stores all state in a local SQLite database, which requires no setup. For production deployments, or when running multiple instances, set the `DATABASE_URL` environment variable (or `--database-url` flag) to a PostgreSQL connection string and Agent Vault switches to Postgres as its backend. All instances share the same database, so state is consistent across replicas.
+
+Migrate existing data with `agent-vault migrate-db --to postgres://...` before switching. See the [PostgreSQL guide](https://docs.agent-vault.dev/self-hosting/postgres) for deployment examples (Kubernetes, Docker Compose), architecture notes, and operational details.
 
 ## SDK
 
