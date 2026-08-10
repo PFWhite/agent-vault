@@ -11,7 +11,7 @@ func TestMatchServiceExact(t *testing.T) {
 	services := []Service{
 		{Name: "stripe", Host: "api.stripe.com", Auth: Auth{Type: "bearer", Token: "STRIPE_KEY"}},
 	}
-	r, score := MatchService("api.stripe.com", "", "/v1/charges", services)
+	r, score := MatchService("api.stripe.com", 0, "/v1/charges", services)
 	if r == nil {
 		t.Fatal("expected a match")
 	}
@@ -28,7 +28,7 @@ func TestMatchServiceWildcard(t *testing.T) {
 		{Name: "github", Host: "*.github.com", Auth: Auth{Type: "bearer", Token: "GH_TOKEN"}},
 	}
 	for _, host := range []string{"api.github.com", "uploads.github.com"} {
-		r, score := MatchService(host, "", "/", services)
+		r, score := MatchService(host, 0, "/", services)
 		if r == nil {
 			t.Fatalf("expected match for %s", host)
 		}
@@ -37,7 +37,7 @@ func TestMatchServiceWildcard(t *testing.T) {
 		}
 	}
 	// Should not match bare "github.com"
-	if r, _ := MatchService("github.com", "", "/", services); r != nil {
+	if r, _ := MatchService("github.com", 0, "/", services); r != nil {
 		t.Fatal("did not expect match for github.com")
 	}
 }
@@ -46,7 +46,7 @@ func TestMatchServiceNoMatch(t *testing.T) {
 	services := []Service{
 		{Name: "stripe", Host: "api.stripe.com", Auth: Auth{Type: "bearer", Token: "STRIPE_KEY"}},
 	}
-	if r, _ := MatchService("evil.com", "", "/", services); r != nil {
+	if r, _ := MatchService("evil.com", 0, "/", services); r != nil {
 		t.Fatal("expected no match")
 	}
 }
@@ -58,11 +58,11 @@ func TestMatchServiceSpecificityWins(t *testing.T) {
 		{Name: "slack-bot", Host: "slack.com", Path: "/api/*", Auth: Auth{Type: "bearer", Token: "SLACK_BOT_TOKEN"}},
 		{Name: "slack-conn", Host: "slack.com", Path: "/api/apps.connections.*", Auth: Auth{Type: "bearer", Token: "SLACK_CONNECTION_TOKEN"}},
 	}
-	r, _ := MatchService("slack.com", "", "/api/apps.connections.open", services)
+	r, _ := MatchService("slack.com", 0, "/api/apps.connections.open", services)
 	if r == nil || r.Name != "slack-conn" {
 		t.Fatalf("expected slack-conn (longer literal prefix), got %+v", r)
 	}
-	r, _ = MatchService("slack.com", "", "/api/chat.postMessage", services)
+	r, _ = MatchService("slack.com", 0, "/api/chat.postMessage", services)
 	if r == nil || r.Name != "slack-bot" {
 		t.Fatalf("expected slack-bot, got %+v", r)
 	}
@@ -75,7 +75,7 @@ func TestMatchServiceHostExactBeatsWildcardEvenWithShorterPath(t *testing.T) {
 		{Name: "wildcard", Host: "*.slack.com", Path: "/api/apps.connections.*", Auth: Auth{Type: "bearer", Token: "T1"}},
 		{Name: "exact", Host: "api.slack.com", Auth: Auth{Type: "bearer", Token: "T2"}},
 	}
-	r, score := MatchService("api.slack.com", "", "/api/apps.connections.open", services)
+	r, score := MatchService("api.slack.com", 0, "/api/apps.connections.open", services)
 	if r == nil || r.Name != "exact" {
 		t.Fatalf("expected exact-host rule to win regardless of path, got %+v", r)
 	}
@@ -89,7 +89,7 @@ func TestMatchServicePathWildcardCrossSlash(t *testing.T) {
 	services := []Service{
 		{Name: "slack-bot", Host: "slack.com", Path: "/api/*", Auth: Auth{Type: "bearer", Token: "T"}},
 	}
-	r, _ := MatchService("slack.com", "", "/api/foo/bar/baz", services)
+	r, _ := MatchService("slack.com", 0, "/api/foo/bar/baz", services)
 	if r == nil {
 		t.Fatal("expected /api/* to match /api/foo/bar/baz greedily")
 	}
@@ -101,7 +101,7 @@ func TestMatchServiceDeclarationOrderTiebreak(t *testing.T) {
 		{Name: "first", Host: "*.example.com", Path: "/v1/*", Auth: Auth{Type: "custom", Headers: map[string]string{"X-First": "1"}}},
 		{Name: "second", Host: "*.example.com", Path: "/v1/*", Auth: Auth{Type: "custom", Headers: map[string]string{"X-Second": "2"}}},
 	}
-	r, score := MatchService("api.example.com", "", "/v1/users", services)
+	r, score := MatchService("api.example.com", 0, "/v1/users", services)
 	if r == nil || r.Name != "first" {
 		t.Fatalf("expected first service to win on tie, got %+v", r)
 	}
@@ -116,263 +116,25 @@ func TestMatchServiceEmptyPathIsCatchAll(t *testing.T) {
 		{Name: "catchall", Host: "slack.com", Auth: Auth{Type: "bearer", Token: "T2"}},
 	}
 	// Path matches the scoped rule → scoped wins (longer literal prefix).
-	r, _ := MatchService("slack.com", "", "/api/foo", services)
+	r, _ := MatchService("slack.com", 0, "/api/foo", services)
 	if r == nil || r.Name != "scoped" {
 		t.Fatalf("expected scoped rule to win when path matches, got %+v", r)
 	}
 	// Path does NOT match the scoped rule → catch-all wins.
-	r, _ = MatchService("slack.com", "", "/oauth/v2/authorize", services)
+	r, _ = MatchService("slack.com", 0, "/oauth/v2/authorize", services)
 	if r == nil || r.Name != "catchall" {
 		t.Fatalf("expected catchall rule when scoped path doesn't match, got %+v", r)
 	}
 }
 
 func TestMatchServicePortStripped(t *testing.T) {
-	// Service hosts with a port are still matched by bare hostname.
+	port := 443
 	services := []Service{
-		{Name: "legacy", Host: "api.stripe.com", Port: "443", Auth: Auth{Type: "bearer", Token: "T"}},
+		{Name: "legacy", Host: "api.stripe.com", Port: &port, Auth: Auth{Type: "bearer", Token: "T"}},
 	}
-	r, _ := MatchService("api.stripe.com", "443", "/v1/charges", services)
+	r, _ := MatchService("api.stripe.com", 443, "/v1/charges", services)
 	if r == nil {
-		t.Fatal("expected port-stripped service host to match")
-	}
-}
-
-// TestMatchServicePortMatch pins that a service with Port set matches
-// only traffic on that port.
-func TestMatchServicePortMatch(t *testing.T) {
-	services := []Service{
-		{Name: "svc", Host: "api.example.com", Port: "8080", Auth: Auth{Type: "bearer", Token: "T"}},
-	}
-	r, score := MatchService("api.example.com", "8080", "/", services)
-	if r == nil {
-		t.Fatal("expected match on port 8080")
-	}
-	if !score.PortMatch {
-		t.Fatal("expected PortMatch=true")
-	}
-}
-
-// TestMatchServicePortMismatch pins that a service with Port set does
-// NOT match traffic on a different port.
-func TestMatchServicePortMismatch(t *testing.T) {
-	services := []Service{
-		{Name: "svc", Host: "api.example.com", Port: "8080", Auth: Auth{Type: "bearer", Token: "T"}},
-	}
-	if r, _ := MatchService("api.example.com", "9090", "/", services); r != nil {
-		t.Fatalf("expected no match on port 9090, got %+v", r)
-	}
-}
-
-// TestMatchServiceNoPortMatchesAny pins that a service with empty Port
-// matches traffic on any port.
-func TestMatchServiceNoPortMatchesAny(t *testing.T) {
-	services := []Service{
-		{Name: "svc", Host: "api.example.com", Auth: Auth{Type: "bearer", Token: "T"}},
-	}
-	for _, port := range []string{"", "80", "443", "8080"} {
-		r, _ := MatchService("api.example.com", port, "/", services)
-		if r == nil {
-			t.Fatalf("expected match on port %q, got nil", port)
-		}
-	}
-}
-
-// TestMatchServicePortBeatsNoPort pins that when two services share
-// host+path, the one with a port match wins over the one without.
-func TestMatchServicePortBeatsNoPort(t *testing.T) {
-	services := []Service{
-		{Name: "any-port", Host: "api.example.com", Auth: Auth{Type: "bearer", Token: "T1"}},
-		{Name: "port-8080", Host: "api.example.com", Port: "8080", Auth: Auth{Type: "bearer", Token: "T2"}},
-	}
-	// On port 8080 — port-matched service should win
-	r, _ := MatchService("api.example.com", "8080", "/", services)
-	if r == nil || r.Name != "port-8080" {
-		t.Fatalf("expected port-8080 to win on port 8080, got %+v", r)
-	}
-	// On port 9090 — only any-port matches
-	r, _ = MatchService("api.example.com", "9090", "/", services)
-	if r == nil || r.Name != "any-port" {
-		t.Fatalf("expected any-port to win on port 9090, got %+v", r)
-	}
-}
-
-// TestMatchServiceWildcardHostWithPort pins that wildcard host matching
-// still works with port — *.github.com:8080 matches api.github.com:8080
-// but not api.github.com:443.
-func TestMatchServiceWildcardHostWithPort(t *testing.T) {
-	services := []Service{
-		{Name: "wildcard-port", Host: "*.github.com", Port: "8080", Auth: Auth{Type: "bearer", Token: "T"}},
-	}
-	r, score := MatchService("api.github.com", "8080", "/", services)
-	if r == nil {
-		t.Fatal("expected wildcard match with port 8080")
-	}
-	if score.HostTier != HostTierWildcard {
-		t.Fatalf("expected wildcard tier, got %d", score.HostTier)
-	}
-	if !score.PortMatch {
-		t.Fatal("expected PortMatch=true")
-	}
-	// Different port should not match
-	if r, _ := MatchService("api.github.com", "443", "/", services); r != nil {
-		t.Fatalf("expected no match on port 443, got %+v", r)
-	}
-}
-
-func TestParsePortHappyPath(t *testing.T) {
-	cases := []struct{ input, want string }{
-		{"", ""},
-		{"80", "80"},
-		{"443", "443"},
-		{"8080", "8080"},
-		{"65535", "65535"},
-		{"0080", "80"},
-		{"0443", "443"},
-		{"00001", "1"},
-	}
-	for _, tc := range cases {
-		got, err := ParsePort(tc.input)
-		if err != nil {
-			t.Errorf("ParsePort(%q) unexpected error: %v", tc.input, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("ParsePort(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
-func TestParsePortRejectsInvalid(t *testing.T) {
-	cases := []struct {
-		name, port string
-	}{
-		{"non-numeric", "80ab"},
-		{"zero", "0"},
-		{"too large", "65536"},
-		{"negative", "-1"},
-		{"plus sign", "+80"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := ParsePort(tc.port); err == nil {
-				t.Fatalf("expected error for port %q", tc.port)
-			}
-		})
-	}
-}
-
-// TestValidatePersistsNormalizedPort pins that Validate writes the
-// canonical port form back to cfg.Services so persisted configs stay
-// canonical (regression: loop-variable mutation that didn't persist).
-func TestValidatePersistsNormalizedPort(t *testing.T) {
-	cfg := &Config{
-		Vault: "default",
-		Services: []Service{
-			{Name: "svc", Host: "api.example.com", Port: "0080", Auth: Auth{Type: "bearer", Token: "T"}},
-		},
-	}
-	if err := Validate(cfg); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if cfg.Services[0].Port != "80" {
-		t.Fatalf("expected Port=\"80\" after Validate, got %q", cfg.Services[0].Port)
-	}
-}
-
-func TestSplitInlineHostWithPort(t *testing.T) {
-	cases := []struct {
-		name      string
-		host, path string
-		wantHost  string
-		wantPort  string
-		wantPath  string
-	}{
-		{"host only", "api.example.com", "", "api.example.com", "", ""},
-		{"host:port", "api.example.com:8080", "", "api.example.com", "8080", ""},
-		{"host:port/path", "api.example.com:8080/api/*", "", "api.example.com", "8080", "/api/*"},
-		{"host/path no port", "api.example.com/api/*", "", "api.example.com", "", "/api/*"},
-		{"host with explicit path", "api.example.com", "/api/*", "api.example.com", "", "/api/*"},
-		{"host:port with explicit path", "api.example.com:8080", "/api/*", "api.example.com", "8080", "/api/*"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			gotHost, gotPort, gotPath := SplitInlineHostWithPort(tc.host, tc.path)
-			if gotHost != tc.wantHost {
-				t.Errorf("host = %q, want %q", gotHost, tc.wantHost)
-			}
-			if gotPort != tc.wantPort {
-				t.Errorf("port = %q, want %q", gotPort, tc.wantPort)
-			}
-			if gotPath != tc.wantPath {
-				t.Errorf("path = %q, want %q", gotPath, tc.wantPath)
-			}
-		})
-	}
-}
-
-// TestValidateConfigPortValidation pins that invalid ports are rejected
-// by the config validator.
-func TestValidateConfigPortValidation(t *testing.T) {
-	cfg := &Config{
-		Vault: "default",
-		Services: []Service{
-			{Name: "svc", Host: "api.example.com", Port: "99999", Auth: Auth{Type: "bearer", Token: "T"}},
-		},
-	}
-	if err := Validate(cfg); err == nil {
-		t.Fatal("expected Validate to reject port 99999")
-	}
-}
-
-// TestServiceMatcherPatternWithPort pins that MatcherPattern includes
-// the port in the joined form.
-func TestServiceMatcherPatternWithPort(t *testing.T) {
-	s := Service{Host: "api.example.com", Port: "8080", Path: "/api/*"}
-	if got := s.MatcherPattern(); got != "api.example.com:8080/api/*" {
-		t.Fatalf("MatcherPattern = %q, want api.example.com:8080/api/*", got)
-	}
-}
-
-// TestServiceMatcherPatternNoPort pins that MatcherPattern omits port
-// when not set.
-func TestServiceMatcherPatternNoPort(t *testing.T) {
-	s := Service{Host: "api.example.com", Path: "/api/*"}
-	if got := s.MatcherPattern(); got != "api.example.com/api/*" {
-		t.Fatalf("MatcherPattern = %q, want api.example.com/api/*", got)
-	}
-}
-
-// TestSlugifyWithPort pins that Slugify includes port in the output.
-func TestSlugifyWithPort(t *testing.T) {
-	got := Slugify("localhost", "8080", "/api/*")
-	// "localhost" + "8080" + "/api/*" → all alphanumeric run together, "/" → "-"
-	if got != "localhost8080-api" {
-		t.Fatalf("Slugify = %q, want localhost8080-api", got)
-	}
-	// Verify it still passes ValidateSlug
-	if err := ValidateSlug(got); err != nil {
-		t.Fatalf("Slugify output %q failed ValidateSlug: %v", got, err)
-	}
-}
-
-// TestAssignSlugNamesAvoidingByHostPortPath pins that services with
-// the same host but different ports can coexist with distinct names.
-func TestAssignSlugNamesAvoidingByHostPortPath(t *testing.T) {
-	existing := []Service{
-		{Name: "svc-8080", Host: "api.example.com", Port: "8080"},
-		{Name: "svc-9090", Host: "api.example.com", Port: "9090"},
-	}
-	incoming := []Service{
-		{Host: "api.example.com", Port: "8080"},
-		{Host: "api.example.com", Port: "9090"},
-	}
-	AssignSlugNamesAvoiding(incoming, existing)
-	if incoming[0].Name != "svc-8080" {
-		t.Fatalf("expected adopted Name=svc-8080, got %q", incoming[0].Name)
-	}
-	if incoming[1].Name != "svc-9090" {
-		t.Fatalf("expected adopted Name=svc-9090, got %q", incoming[1].Name)
+		t.Fatal("expected port-specific service to match")
 	}
 }
 
@@ -411,20 +173,20 @@ func TestValidateSlugRejects(t *testing.T) {
 
 func TestSlugify(t *testing.T) {
 	cases := []struct {
-		name, host, port, path, want string
+		name, host, path, want string
 	}{
-		{"plain host", "api.anthropic.com", "", "", "api-anthropic-com"},
-		{"host plus path", "slack.com", "", "/api/*", "slack-com-api"},
-		{"host plus literal path", "slack.com", "", "/api/apps.connections.*", "slack-com-api-apps-connections"},
-		{"wildcard host", "*.github.com", "", "", "github-com"},
-		{"wildcard host with path", "*.github.com", "", "/repos/*", "github-com-repos"},
-		{"underscores in path", "api.example.com", "", "/v1/foo_bar", "api-example-com-v1-foo-bar"},
+		{"plain host", "api.anthropic.com", "", "api-anthropic-com"},
+		{"host plus path", "slack.com", "/api/*", "slack-com-api"},
+		{"host plus literal path", "slack.com", "/api/apps.connections.*", "slack-com-api-apps-connections"},
+		{"wildcard host", "*.github.com", "", "github-com"},
+		{"wildcard host with path", "*.github.com", "/repos/*", "github-com-repos"},
+		{"underscores in path", "api.example.com", "/v1/foo_bar", "api-example-com-v1-foo-bar"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Slugify(tc.host, tc.port, tc.path)
+			got := Slugify(tc.host, tc.path, nil)
 			if got != tc.want {
-				t.Fatalf("Slugify(%q, %q, %q) = %q, want %q", tc.host, tc.port, tc.path, got, tc.want)
+				t.Fatalf("Slugify(%q, %q) = %q, want %q", tc.host, tc.path, got, tc.want)
 			}
 			if err := ValidateSlug(got); err != nil {
 				t.Fatalf("Slugify output %q failed ValidateSlug: %v", got, err)
@@ -435,7 +197,7 @@ func TestSlugify(t *testing.T) {
 
 func TestSlugifyTruncatesAndStaysValid(t *testing.T) {
 	long := strings.Repeat("a.", 100) + "com"
-	got := Slugify(long, "", "")
+	got := Slugify(long, "", nil)
 	if len(got) > 64 {
 		t.Fatalf("expected truncation, got %d chars", len(got))
 	}
@@ -1168,12 +930,21 @@ func TestValidateSubstitutionsRejectsLowerCaseKey(t *testing.T) {
 	}
 }
 
-func TestValidateSubstitutionsRejectsBodySurface(t *testing.T) {
+func TestValidateSubstitutionsAcceptsBodySurface(t *testing.T) {
 	s := Service{Host: "api.example.com", Substitutions: []Substitution{
 		{Key: "K_X", Placeholder: "__sid__", In: []string{"body"}},
 	}}
-	if err := s.ValidateSubstitutions(); err == nil {
-		t.Fatal("expected error for body surface (deferred in v1)")
+	if err := s.ValidateSubstitutions(); err != nil {
+		t.Fatalf("body surface should be valid: %v", err)
+	}
+}
+
+func TestValidateSubstitutionsAcceptsWebsocketSurface(t *testing.T) {
+	s := Service{Host: "api.example.com", Substitutions: []Substitution{
+		{Key: "K_X", Placeholder: "__sid__", In: []string{"websocket"}},
+	}}
+	if err := s.ValidateSubstitutions(); err != nil {
+		t.Fatalf("websocket surface should be valid: %v", err)
 	}
 }
 
@@ -1269,5 +1040,267 @@ func TestServiceCredentialKeysOnlyAuth(t *testing.T) {
 	keys := s.CredentialKeys()
 	if len(keys) != 1 || keys[0] != "MY_KEY" {
 		t.Fatalf("expected [MY_KEY], got %v", keys)
+	}
+}
+
+func TestAnyHostMatches(t *testing.T) {
+	services := []Service{
+		{Host: "api.stripe.com", Auth: Auth{Type: "bearer", Token: "K"}},
+		{Host: "*.github.com", Auth: Auth{Type: "bearer", Token: "K"}},
+		{Host: "slack.com", Path: "/api/*", Auth: Auth{Type: "bearer", Token: "K"}},
+	}
+
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"api.stripe.com", true},
+		{"api.github.com", true},
+		{"raw.github.com", true},
+		{"github.com", false},
+		{"a.b.github.com", false},
+		{"slack.com", true},
+		{"api.unknown.com", false},
+		{"example.com", false},
+	}
+	for _, tt := range tests {
+		got := AnyHostMatches(tt.host, services)
+		if got != tt.want {
+			t.Errorf("AnyHostMatches(%q) = %v, want %v", tt.host, got, tt.want)
+		}
+	}
+
+	// Nil services: nothing matches.
+	if AnyHostMatches("anything.com", nil) {
+		t.Error("AnyHostMatches with nil services should return false")
+	}
+}
+
+// --- Helper ---
+
+func intPtr(v int) *int { return &v }
+
+// --- Port-specific MatchService tests ---
+
+func TestMatchServicePortExactMatch(t *testing.T) {
+	services := []Service{
+		{Name: "svc", Host: "api.example.com", Port: intPtr(8080), Auth: Auth{Type: "bearer", Token: "T"}},
+	}
+	r, _ := MatchService("api.example.com", 8080, "/", services)
+	if r == nil {
+		t.Fatal("expected port-specific service to match when port matches")
+	}
+}
+
+func TestMatchServicePortMismatch(t *testing.T) {
+	services := []Service{
+		{Name: "svc", Host: "api.example.com", Port: intPtr(8080), Auth: Auth{Type: "bearer", Token: "T"}},
+	}
+	r, _ := MatchService("api.example.com", 9090, "/", services)
+	if r != nil {
+		t.Fatal("expected no match when port does not match")
+	}
+}
+
+func TestMatchServicePortNilMatchesAny(t *testing.T) {
+	services := []Service{
+		{Name: "svc", Host: "api.example.com", Auth: Auth{Type: "bearer", Token: "T"}},
+	}
+	r, _ := MatchService("api.example.com", 443, "/", services)
+	if r == nil {
+		t.Fatal("expected Port=nil service to match any target port")
+	}
+}
+
+func TestMatchServicePortSpecificBeatsWildcard(t *testing.T) {
+	services := []Service{
+		{Name: "wildcard-port", Host: "api.example.com", Auth: Auth{Type: "bearer", Token: "T1"}},
+		{Name: "specific-port", Host: "api.example.com", Port: intPtr(3000), Auth: Auth{Type: "bearer", Token: "T2"}},
+	}
+	r, score := MatchService("api.example.com", 3000, "/", services)
+	if r == nil || r.Name != "specific-port" {
+		t.Fatalf("expected specific-port to win, got %+v", r)
+	}
+	if !score.PortSpecific {
+		t.Fatal("expected PortSpecific=true")
+	}
+}
+
+func TestMatchServicePortSpecificDoesNotOverrideHostTier(t *testing.T) {
+	services := []Service{
+		{Name: "exact-host", Host: "api.example.com", Auth: Auth{Type: "bearer", Token: "T1"}},
+		{Name: "wildcard-host", Host: "*.example.com", Port: intPtr(3000), Auth: Auth{Type: "bearer", Token: "T2"}},
+	}
+	r, _ := MatchService("api.example.com", 3000, "/", services)
+	if r == nil || r.Name != "exact-host" {
+		t.Fatalf("expected exact-host to win (host tier beats port specificity), got %+v", r)
+	}
+}
+
+func TestMatchServiceTwoPortsSameHost(t *testing.T) {
+	services := []Service{
+		{Name: "port-3000", Host: "api.example.com", Port: intPtr(3000), Auth: Auth{Type: "bearer", Token: "T1"}},
+		{Name: "port-4000", Host: "api.example.com", Port: intPtr(4000), Auth: Auth{Type: "bearer", Token: "T2"}},
+	}
+	r, _ := MatchService("api.example.com", 3000, "/", services)
+	if r == nil || r.Name != "port-3000" {
+		t.Fatalf("expected port-3000 for request to port 3000, got %+v", r)
+	}
+	r, _ = MatchService("api.example.com", 4000, "/", services)
+	if r == nil || r.Name != "port-4000" {
+		t.Fatalf("expected port-4000 for request to port 4000, got %+v", r)
+	}
+}
+
+// --- ValidatePort tests ---
+
+func TestValidatePortNil(t *testing.T) {
+	if err := ValidatePort(nil); err != nil {
+		t.Fatalf("expected nil port to pass, got %v", err)
+	}
+}
+
+func TestValidatePortValid(t *testing.T) {
+	for _, p := range []int{1, 80, 443, 8080, 65535} {
+		if err := ValidatePort(intPtr(p)); err != nil {
+			t.Errorf("ValidatePort(%d) unexpected error: %v", p, err)
+		}
+	}
+}
+
+func TestValidatePortInvalid(t *testing.T) {
+	for _, p := range []int{0, -1, 65536} {
+		if err := ValidatePort(intPtr(p)); err == nil {
+			t.Errorf("ValidatePort(%d) expected error", p)
+		}
+	}
+}
+
+// --- SplitInlineHost tests ---
+
+func TestSplitInlineHostWithPort(t *testing.T) {
+	host, path, port := SplitInlineHost("internal.corp.com:3000/api/*", "")
+	if host != "internal.corp.com" {
+		t.Fatalf("expected host=internal.corp.com, got %q", host)
+	}
+	if path != "/api/*" {
+		t.Fatalf("expected path=/api/*, got %q", path)
+	}
+	if port == nil || *port != 3000 {
+		t.Fatalf("expected port=3000, got %v", port)
+	}
+}
+
+func TestSplitInlineHostPortOnly(t *testing.T) {
+	host, path, port := SplitInlineHost("internal.corp.com:3000", "")
+	if host != "internal.corp.com" {
+		t.Fatalf("expected host=internal.corp.com, got %q", host)
+	}
+	if path != "" {
+		t.Fatalf("expected path=\"\", got %q", path)
+	}
+	if port == nil || *port != 3000 {
+		t.Fatalf("expected port=3000, got %v", port)
+	}
+}
+
+func TestSplitInlineHostNoPort(t *testing.T) {
+	host, path, port := SplitInlineHost("api.stripe.com", "")
+	if host != "api.stripe.com" {
+		t.Fatalf("expected host=api.stripe.com, got %q", host)
+	}
+	if path != "" {
+		t.Fatalf("expected path=\"\", got %q", path)
+	}
+	if port != nil {
+		t.Fatalf("expected port=nil, got %v", port)
+	}
+}
+
+func TestSplitInlineHostExistingPath(t *testing.T) {
+	host, path, port := SplitInlineHost("api.stripe.com:8080", "/v1/*")
+	if host != "api.stripe.com" {
+		t.Fatalf("expected host=api.stripe.com, got %q", host)
+	}
+	if path != "/v1/*" {
+		t.Fatalf("expected path=/v1/*, got %q", path)
+	}
+	if port == nil || *port != 8080 {
+		t.Fatalf("expected port=8080, got %v", port)
+	}
+}
+
+// --- MatcherPattern tests ---
+
+func TestMatcherPatternWithPort(t *testing.T) {
+	s := Service{Host: "internal.corp.com", Port: intPtr(3000), Path: "/api/*"}
+	got := s.MatcherPattern()
+	want := "internal.corp.com:3000/api/*"
+	if got != want {
+		t.Fatalf("MatcherPattern() = %q, want %q", got, want)
+	}
+}
+
+func TestMatcherPatternWithoutPort(t *testing.T) {
+	s := Service{Host: "api.stripe.com", Path: "/v1/*"}
+	got := s.MatcherPattern()
+	want := "api.stripe.com/v1/*"
+	if got != want {
+		t.Fatalf("MatcherPattern() = %q, want %q", got, want)
+	}
+}
+
+// --- Slugify with port ---
+
+func TestSlugifyWithPort(t *testing.T) {
+	withPort := Slugify("api.example.com", "/api/*", intPtr(8443))
+	withoutPort := Slugify("api.example.com", "/api/*", nil)
+	if withPort == withoutPort {
+		t.Fatalf("expected distinct slugs, both produced %q", withPort)
+	}
+	if err := ValidateSlug(withPort); err != nil {
+		t.Fatalf("slug with port %q failed ValidateSlug: %v", withPort, err)
+	}
+}
+
+// --- NormalizePort tests ---
+
+func TestNormalizePortExtractsFromHost(t *testing.T) {
+	svc := Service{Host: "internal.corp.com:3000"}
+	if err := NormalizePort(&svc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if svc.Host != "internal.corp.com" {
+		t.Fatalf("expected host=internal.corp.com, got %q", svc.Host)
+	}
+	if svc.Port == nil || *svc.Port != 3000 {
+		t.Fatalf("expected port=3000, got %v", svc.Port)
+	}
+}
+
+func TestNormalizePortConflictErrors(t *testing.T) {
+	svc := Service{Host: "internal.corp.com:3000", Port: intPtr(4000)}
+	if err := NormalizePort(&svc); err == nil {
+		t.Fatal("expected error for conflicting port")
+	}
+}
+
+func TestNormalizePortAgreementOK(t *testing.T) {
+	svc := Service{Host: "internal.corp.com:3000", Port: intPtr(3000)}
+	if err := NormalizePort(&svc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if svc.Port == nil || *svc.Port != 3000 {
+		t.Fatalf("expected port=3000, got %v", svc.Port)
+	}
+}
+
+func TestNormalizePortYAMLPortPreserved(t *testing.T) {
+	svc := Service{Host: "internal.corp.com", Port: intPtr(3000)}
+	if err := NormalizePort(&svc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if svc.Port == nil || *svc.Port != 3000 {
+		t.Fatalf("expected port=3000 preserved, got %v", svc.Port)
 	}
 }
